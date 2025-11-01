@@ -16,20 +16,25 @@ class Card:
     effect: Callable[[GameState, GameEngine, np.random.Generator, int], Tuple[GameState, Dict]]  # effect function
 
 class CardDeck:
-    cards: List[Card]
-    pointer: int
+    def __init__(self, cards: List[Card]):
+        self.cards = cards
+        self.pointer = 0
 
     def shuffle(self, rng: np.random.Generator) -> None:
-        pass
+        self.cards = list(rng.permutation(self.cards))
 
     def draw(self) -> Card:
-        pass
+        card = self.cards[self.pointer]
+        self.pointer = (self.pointer + 1) % len(self.cards)
+        return card
 
     def reset(self, rng: np.random.Generator) -> None:
-        pass
+        self.shuffle(rng)
+        self.pointer = 0
 
     def apply_card(self, card: Card, state: GameState, engine: GameEngine, rng: np.random.Generator) -> Tuple[GameState, Dict]:
-        pass
+        # Apply the card effect for the current player
+        return card.effect(state, engine, rng, state.current_player)
 
 def load_chance_cards() -> List[Card]:
     def advance_to_go(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:

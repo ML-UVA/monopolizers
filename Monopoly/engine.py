@@ -1,12 +1,29 @@
+from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
 import numpy as np
 import random
 from .rules import RulesEngine
 from .state import GameState
 
+@dataclass
 class EngineConfig:
-    # max_turns etc.
-    pass
+    max_turns: int = 1000  # Maximum turns before game ends
+    enable_free_parking_money: bool = False  # Whether free parking collects fines/taxes
+    income_tax_option: str = "200_or_10_percent"  # "200" or "10_percent" or "200_or_10_percent"
+    luxury_tax_amount: int = 75  # Luxury tax amount
+    salary_on_go: int = 200  # Amount collected passing/landing on GO
+    jail_fee: int = 50  # Fee to get out of jail after rolls
+    max_jail_attempts: int = 3  # Attempts to roll doubles before paying fee
+    auction_start_bid: int = 1  # Starting bid for auctions
+    enable_trading: bool = True  # Allow property trading between players
+    enable_auctions: bool = True  # Enable auctions for declined properties
+    max_houses_per_property: int = 4  # Houses before hotel
+    hotel_requires_4_houses: bool = True  # Must have 4 houses to build hotel
+    even_building_rule: bool = True  # Must build evenly across monopolies
+    enable_houses_and_hotels: bool = True  # Allow building houses and hotels
+    starting_cash: int = 1500  # Initial cash for each player
+    max_players: int = 4  # Maximum number of players
+    # Add more config options as needed
 
 class GameEngine:
     def __init__(self, rules_engine: RulesEngine, seed: int = 42):
