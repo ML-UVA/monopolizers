@@ -1,70 +1,44 @@
-from dataclasses import dataclass
-from typing import List, Dict, Set, Sequence, Tuple, Any, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Set
+from enum import Enum
 
-# Forward reference for PropertySpec
-class PropertySpec:
-    pass
+class PlayerStatus(Enum):
+    ACTIVE = 'ACTIVE'
+    BANKRUPT = 'BANKRUPT'
 
 @dataclass
 class PlayerState:
     id: int
-    name: str
     cash: int
     position: int
-    properties: List[int]  # or Set[int]
-    houses: Dict[int, int]  # property_idx -> houses
-    mortgaged: Set[int]
-    in_jail: bool
-    jail_turns: int
-    get_out_cards: int
-    active: bool
-
-    def to_dict(self) -> Dict:
-        pass
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> 'PlayerState':
-        pass
-
-    def net_worth(self, property_specs: Sequence[PropertySpec]) -> int:
-        pass
+    properties_owned: Set[int]  # set of property indices
+    houses_on_property: Dict[int, int]  # property_idx -> houses_count (0-4, 5=hotel)
+    mortgaged_properties: Set[int]  # set of mortgaged property indices
+    jail_turns: int  # 0 if not in jail
+    get_out_of_jail_cards: int
+    status: PlayerStatus = PlayerStatus.ACTIVE
 
 @dataclass
 class PropertyState:
-    idx: int
     owner: Optional[int]  # player id or None
-    houses: int
-    mortgaged: bool
+    houses_count: int = 0  # 0-4, 5=hotel
+    mortgaged: bool = False
 
-    def to_dict(self) -> Dict:
-        pass
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> 'PropertyState':
-        pass
+@dataclass
+class DeckState:
+    pointer: int  # current card index
+    seed: int  # for reproducibility
 
 @dataclass
 class GameState:
     players: List[PlayerState]
-    properties: List[PropertyState]
-    bank_houses: int
-    bank_hotels: int
-    current_player: int
-    last_roll: Optional[Tuple[int, int]]
-    doubles_count: int
-    turn_number: int
-    rng_state: Any  # portable RNG state or seed
-    history: List[Dict]  # optional action/state log
-
-    def copy(self) -> 'GameState':
-        pass
-
-    def to_dict(self) -> Dict:
-        pass
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> 'GameState':
-        pass
-
-    def snapshot(self) -> str:
-        pass
+    properties: List[PropertyState]  # list of property states, indexed by property_idx
+    chance_deck: DeckState
+    community_deck: DeckState
+    bank_houses_left: int = 32
+    bank_hotels_left: int = 12
+    current_player: int = 0
+    last_roll: Optional[tuple[int, int]] = None
+    doubles_count: int = 0
+    turn_number: int = 0
+    seed: int = 0  # global seed for reproducibility
