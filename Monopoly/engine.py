@@ -23,7 +23,6 @@ class EngineConfig:
     enable_houses_and_hotels: bool = True  # Allow building houses and hotels
     starting_cash: int = 1500  # Initial cash for each player
     max_players: int = 4  # Maximum number of players
-    # Add more config options as needed
 
 class GameEngine:
     def __init__(self, rules_engine: RulesEngine, seed: int = 42):

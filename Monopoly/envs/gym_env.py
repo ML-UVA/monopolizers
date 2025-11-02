@@ -1,15 +1,8 @@
 from typing import Callable, Optional, Tuple, Dict, Any, List
 import numpy as np
 import gym
-# Replace ambiguous relative import with parent-package relative + fallback to absolute.
-try:
-    from ..engine import GameEngine  # engine.py in parent Monopoly package
-except Exception:
-    try:
-        from monopolizers.Monopoly.engine import GameEngine  # absolute path fallback (IDE/runtime)
-    except Exception:
-        # Last-resort: keep original relative form (may still warn if run as script)
-        from .engine import GameEngine
+from ..engine import GameEngine
+
 
 """Gym wrapper for the Monopoly game engine.
 

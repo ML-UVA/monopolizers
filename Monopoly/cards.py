@@ -109,6 +109,32 @@ def load_chance_cards() -> List[Card]:
             state.players[state.properties[prop_idx].owner].cash += rent
         return state, {"moved_to": nearest, "passed_go": nearest < old_pos}
 
+    def pay_15(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        state.players[player_id].cash -= 15
+        return state, {"paid": 15}
+
+    def ride_reading(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        old_pos = state.players[player_id].position
+        state.players[player_id].position = 5
+        if state.players[player_id].position < old_pos:
+            state.players[player_id].cash += 200
+        return state, {"passed_go": state.players[player_id].position < old_pos}
+
+    def chairman_board(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        for i, p in enumerate(state.players):
+            if i != player_id:
+                p.cash -= 50
+                state.players[player_id].cash += 50
+        return state, {"collected_per": 50}
+
+    def building_loan(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        state.players[player_id].cash += 150
+        return state, {"collected": 150}
+
+    def crossword(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        state.players[player_id].cash += 100
+        return state, {"collected": 100}
+
     return [
         Card("Advance to GO", "Advance to GO (Collect $200)", advance_to_go),
         Card("Advance to Illinois Avenue", "Advance to Illinois Avenue. If you pass GO, collect $200.", advance_to_illinois),
@@ -207,14 +233,4 @@ def load_community_cards() -> List[Card]:
         Card("Sale of stock", "From sale of stock you get $50.", sale_stock),
         Card("Get out of Jail Free", "Get out of Jail Free.", get_out_jail_comm),
         Card("Go to Jail", "Go to Jail. Go directly to Jail. Do not pass GO. Do not collect $200.", go_to_jail_comm),
-        Card("Holiday fund", "Holiday fund matures. Receive $100.", holiday_fund),
-        Card("Income tax refund", "Income tax refund. Collect $20.", income_refund),
-        Card("It's your birthday", "It's your birthday. Collect $10 from every player.", birthday),
-        Card("Life insurance", "Life insurance matures. Collect $100.", life_insurance),
-        Card("Hospital fees", "Pay hospital fees of $100.", hospital_fees),
-        Card("School fees", "Pay school fees of $50.", school_fees),
-        Card("Consultancy fee", "Receive $25 consultancy fee.", consultancy_fee),
-        Card("Street repairs", "You are assessed for street repairs. $40 per house. $115 per hotel.", street_repairs),
-        Card("Beauty contest", "You have won second prize in a beauty contest. Collect $10.", beauty_contest),
-        Card("You inherit", "You inherit $100.", inherit),
-    ]
+        Card("Holiday fund", "Holiday fund matures. Receive $100.",
