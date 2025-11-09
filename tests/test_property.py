@@ -15,7 +15,9 @@ def test_rent_for_property():
 
 def test_rent_for_railroad():
     spec = PropertySpec(idx=2, name="Reading Railroad", group="Railroad", price=200, house_cost=0, mortgage_value=100, rent_table=[25, 50, 100, 200])
-    assert spec.rent_for(1, False) == 50  # 2 railroads
+    # rent_for expects the number of railroads owned; 1 owned -> 25, 2 owned -> 50
+    assert spec.rent_for(1, False) == 25  # 1 railroad
+    assert spec.rent_for(2, False) == 50  # 2 railroads
 
 def test_rent_for_utility():
     spec = PropertySpec(idx=7, name="Electric Company", group="Utility", price=150, house_cost=0, mortgage_value=75, rent_table=[4, 10])

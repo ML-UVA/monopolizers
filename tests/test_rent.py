@@ -16,14 +16,18 @@ def rules_engine():
 @pytest.fixture
 def sample_state():
     players = [
-        PlayerState(id=0, cash=1500, position=0, properties_owned={0, 1}, houses_on_property={}, mortgaged_properties=set(), jail_turns=0, get_out_of_jail_cards=0),
+        PlayerState(id=0, cash=1500, position=0, properties_owned={0}, houses_on_property={}, mortgaged_properties=set(), jail_turns=0, get_out_of_jail_cards=0),
         PlayerState(id=1, cash=1500, position=0, properties_owned=set(), houses_on_property={}, mortgaged_properties=set(), jail_turns=0, get_out_of_jail_cards=0)
     ]
-    properties = [PropertyState(owner=0 if i in [0, 1] else None) for i in range(28)]
+    # By default only Mediterranean (0) is owned; individual tests will set additional ownership as needed
+    properties = [PropertyState(owner=0 if i == 0 else None) for i in range(28)]
     return GameState(players=players, properties=properties, chance_deck=None, community_deck=None)
 
 def test_rent_calculation_with_houses_and_monopoly(rules_engine, sample_state):
     # Mediterranean (0) owned by 0, monopoly with Baltic (1), add houses
+    # set up monopoly explicitly for this test
+    sample_state.properties[1].owner = 0
+    sample_state.players[0].properties_owned.add(1)
     sample_state.properties[0].houses_count = 2  # 2 houses
     rent = rules_engine.calculate_rent(sample_state, 0)
     assert rent == 30  # Rent table for 2 houses on Mediterranean
@@ -36,6 +40,9 @@ def test_rent_calculation_no_monopoly(rules_engine, sample_state):
 
 def test_rent_calculation_monopoly_no_houses(rules_engine, sample_state):
     # Monopoly but no houses
+    # create monopoly explicitly
+    sample_state.properties[1].owner = 0
+    sample_state.players[0].properties_owned.add(1)
     rent = rules_engine.calculate_rent(sample_state, 0)
     assert rent == 4  # Doubled base rent for monopoly
 

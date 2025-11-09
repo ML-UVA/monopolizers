@@ -25,5 +25,5 @@ def test_run_turn_basic(game_engine, initial_state):
     new_state = game_engine.run_turn(initial_state)
     assert new_state.turn_number == 1
     assert new_state.current_player == 0  # Single player, stays 0
-    # Position should have changed based on roll
-    assert new_state.players[0].position != 0
+    # Position should have changed based on roll — or a card may have moved the player to GO (cash will change)
+    assert (new_state.players[0].position != 0) or (new_state.players[0].cash != 1500)

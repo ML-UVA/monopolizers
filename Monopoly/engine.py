@@ -40,7 +40,7 @@ class GameEngine:
                 player.jail_turns = 0
                 steps = sum(roll)
                 state = self.rules_engine.move_player(state, player_id, steps)
-                state = self.rules_engine.handle_landing(state, player_id, self.rng)
+                state = self.rules_engine.handle_landing(state, player_id, self.rng, engine=self)
             else:
                 player.jail_turns += 1
                 if player.jail_turns >= 4:  # After 3 attempts, pay $50
@@ -54,7 +54,7 @@ class GameEngine:
             if player.jail_turns == 0:
                 steps = sum(roll)
                 state = self.rules_engine.move_player(state, player_id, steps)
-                state = self.rules_engine.handle_landing(state, player_id, self.rng)
+                state = self.rules_engine.handle_landing(state, player_id, self.rng, engine=self)
         
         # End turn
         state.current_player = (state.current_player + 1) % len(state.players)

@@ -5,7 +5,7 @@ from .state import GameState
 from .trade import TradeProposal
 import random
 from typing import Optional, Tuple, List
-from .state import GameState, PlayerState, PlayerStatus, PropertyState
+from .state import GameState, PlayerState, PlayerStatus, PropertyState, DeckState
 from .board import Board, TileKind
 from .property import load_property_specs, PropertySpec
 from .cards import load_chance_cards, load_community_cards, Card
@@ -81,7 +81,7 @@ class RulesEngine:
         
         return state, reward, done, log
 
-    def handle_landing(self, state: GameState, player_id: int, rng: random.Random) -> GameState:
+    def handle_landing(self, state: GameState, player_id: int, rng: random.Random, engine=None) -> GameState:
         pos = state.players[player_id].position
         tile = self.board.get_tile(pos)
         if tile.kind == TileKind.PROPERTY or tile.kind == TileKind.RAILROAD or tile.kind == TileKind.UTILITY:
@@ -99,10 +99,11 @@ class RulesEngine:
             state.players[player_id].cash -= tax
         elif tile.kind == TileKind.CHANCE:
             card = self.draw_card(state, "chance", rng)
-            state, _ = self.apply_card_effect(state, player_id, card)
+            # Card.effect expects (state, engine, rng, player_id)
+            state, _ = card.effect(state, engine, rng, player_id)
         elif tile.kind == TileKind.COMMUNITY:
             card = self.draw_card(state, "community", rng)
-            state, _ = self.apply_card_effect(state, player_id, card)
+            state, _ = card.effect(state, engine, rng, player_id)
         elif tile.kind == TileKind.GO_TO_JAIL:
             state.players[player_id].position = 10
             state.players[player_id].jail_turns = 1
@@ -127,7 +128,8 @@ class RulesEngine:
         monopoly = self._has_monopoly(state, property_idx, owner)
         houses = prop_state.houses_count
         if spec.group in ["Railroad", "Utility"]:
-            owned_count = sum(1 for p in state.properties if p.owner == owner and self.property_specs[state.properties.index(p)].group == spec.group)
+            # Count owned properties by index to avoid dataclass equality collisions
+            owned_count = sum(1 for i, prop in enumerate(state.properties) if prop.owner == owner and self.property_specs[i].group == spec.group)
             if spec.group == "Railroad":
                 return spec.rent_table[owned_count - 1] if 1 <= owned_count <= 4 else 0
             elif spec.group == "Utility":
@@ -177,20 +179,19 @@ class RulesEngine:
         return state
 
     def draw_card(self, state: GameState, deck: str, rng: random.Random) -> Card:
+        # Ensure deck state exists on the GameState (tests/engines sometimes leave it None)
         if deck == "chance":
+            if getattr(state, 'chance_deck', None) is None:
+                state.chance_deck = DeckState(pointer=0, seed=state.seed)
             card = self.chance_cards[state.chance_deck.pointer]
             state.chance_deck.pointer = (state.chance_deck.pointer + 1) % len(self.chance_cards)
         elif deck == "community":
+            if getattr(state, 'community_deck', None) is None:
+                state.community_deck = DeckState(pointer=0, seed=state.seed)
             card = self.community_cards[state.community_deck.pointer]
             state.community_deck.pointer = (state.community_deck.pointer + 1) % len(self.community_cards)
         return card
 
-    def apply_card_effect(self, state: GameState, player_id: int, card: Card) -> GameState:
-        # Implement card effects (e.g., move, pay, collect)
-        # Placeholder: assume card has effect_type and params
-        if card.effect_type == "move":
-            self.move_player(state, player_id, card.steps)
-        elif card.effect_type == "pay":
-            state.players[player_id].cash -= card.amount
-        # Add more effects as needed
-        return state
+    def apply_card_effect(self, state: GameState, player_id: int, card: Card, engine=None, rng: random.Random = None) -> GameState:
+        # Backwards-compat wrapper: call the card's effect function which uses (state, engine, rng, player_id)
+        return card.effect(state, engine, rng, player_id)
