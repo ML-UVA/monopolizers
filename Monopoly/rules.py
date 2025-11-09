@@ -39,8 +39,81 @@ class RulesEngine:
         self.chance_cards = chance_cards
         self.community_cards = community_cards
 
-    def legal_actions(self, state: GameState, player_id: int) -> List[Dict] or np.ndarray:
-        pass
+    def legal_actions(self, state: GameState, player_id: int) -> List[Dict]:
+        """
+        Return list of legal action dicts for the given player.
+        
+        Returns:
+            List of action dicts with 'type' and optional parameters
+        """
+        actions = []
+        player = state.players[player_id]
+        
+        # Roll action (if turn hasn't started yet)
+        if state.last_roll is None or state.current_player == player_id:
+            actions.append({'type': 'roll'})
+        
+        # Check current position for property transactions
+        pos = player.position
+        tile = self.board.get_tile(pos)
+        
+        if tile.property_idx is not None:
+            prop = state.properties[tile.property_idx]
+            spec = self.property_specs[tile.property_idx]
+            
+            # Buy action
+            if prop.owner is None and player.cash >= spec.price:
+                actions.append({'type': 'buy', 'property_idx': tile.property_idx, 'cost': spec.price})
+        
+        # Pass action (always available)
+        actions.append({'type': 'pass'})
+        
+        # Build house actions (on monopolies)
+        for prop_idx in player.properties_owned:
+            if self._has_monopoly(state, prop_idx, player_id):
+                spec = self.property_specs[prop_idx]
+                prop = state.properties[prop_idx]
+                if (prop.houses_count < 5 and 
+                    player.cash >= spec.house_cost and 
+                    not prop.mortgaged and
+                    state.bank_houses_left > 0):
+                    actions.append({
+                        'type': 'build',
+                        'property_idx': prop_idx,
+                        'cost': spec.house_cost
+                    })
+        
+        # Mortgage actions
+        for prop_idx in player.properties_owned:
+            prop = state.properties[prop_idx]
+            spec = self.property_specs[prop_idx]
+            
+            if not prop.mortgaged and prop.houses_count == 0:
+                actions.append({
+                    'type': 'mortgage',
+                    'property_idx': prop_idx,
+                    'value': spec.mortgage_value
+                })
+            elif prop.mortgaged:
+                unmortgage_cost = int(spec.mortgage_value * 1.1)
+                if player.cash >= unmortgage_cost:
+                    actions.append({
+                        'type': 'unmortgage',
+                        'property_idx': prop_idx,
+                        'cost': unmortgage_cost
+                    })
+        
+        # Jail actions
+        if player.jail_turns > 0:
+            if player.cash >= 50:
+                actions.append({'type': 'pay_fine', 'cost': 50})
+            if player.get_out_of_jail_cards > 0:
+                actions.append({'type': 'use_jail_card'})
+        
+        # End turn action
+        actions.append({'type': 'end_turn'})
+        
+        return actions
 
     def apply_action(self, state: GameState, action: dict, rng: random.Random) -> Tuple[GameState, float, bool, str]:
         action_type = action.get('type')

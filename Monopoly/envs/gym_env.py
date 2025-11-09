@@ -1,58 +1,382 @@
 from typing import Callable, Optional, Tuple, Dict, Any, List
 import numpy as np
-import gym
+import gymnasium as gym
+from gymnasium import spaces
 from ..engine import GameEngine
+from ..rules import RulesEngine, ActionType
+from ..state import GameState, PlayerState, PropertyState, DeckState, PlayerStatus
+from ..board import Board
+from ..property import load_property_specs
+from ..cards import load_chance_cards, load_community_cards
 
 
-"""Gym wrapper for the Monopoly game engine.
+"""Gymnasium wrapper for the Monopoly game engine.
 
-This file contains the skeleton Gym environment interface. Methods are intentionally
-left unimplemented and will raise NotImplementedError to make intended API explicit
-while you implement the engine and observation/action schemas.
+This environment provides a single-agent interface where one player is controlled
+by an RL agent and opponents follow fixed policies (e.g., random, greedy).
 """
 
-class MonopolyEnv(gym.Env):
-    # Parameters:
-    # game_engine_factory: Callable[[seed], GameEngine] OR game_engine instance
-    # opponent_policies: List[Callable[[obs], action]]
-    # obs_type: 'compact' or 'verbose'
-    # max_turns: int
-    # Attributes:
-    # action_space: gym.spaces (e.g., Discrete or Dict)
-    # observation_space: gym.spaces
-    # engine: GameEngine
-    # current_player_id: int (the learning agent id)
 
-    def __init__(self, game_engine_factory, opponent_policies, obs_type='compact', max_turns=1000):
-        # Minimal bookkeeping; full implementation should set action_space and observation_space.
-        self.game_engine_factory = game_engine_factory
-        self.opponent_policies = opponent_policies
-        self.obs_type = obs_type
+class MonopolyEnv(gym.Env):
+    """
+    Monopoly Gymnasium Environment
+    
+    Action Space: Discrete(n_actions) where actions are:
+        0: Roll dice (start turn)
+        1: Buy property (if landed on unowned)
+        2: Pass on buying
+        3-30: Build house on property idx (3 + property_idx)
+        31-58: Mortgage property idx (31 + property_idx)
+        59-86: Unmortgage property idx (59 + property_idx)
+        87: Pay jail fine
+        88: Use get-out-of-jail card
+        89: End turn / Pass
+        
+    Observation Space: Dict with:
+        - player_id: Box (agent's player id)
+        - cash: Box (n_players,) - cash for each player
+        - positions: Box (n_players,) - board position for each player
+        - property_owner: Box (28,) - owner id or -1 for unowned
+        - houses: Box (28,) - house count (0-5, 5=hotel)
+        - mortgaged: Box (28,) - binary mortgage status
+        - jail_turns: Box (n_players,) - turns in jail
+        - get_out_cards: Box (n_players,) - jail cards held
+        - legal_mask: Box (n_actions,) - binary legal action mask
+        - turn_number: Box - current turn
+        - last_roll: Box (2,) - last dice roll
+    """
+    
+    metadata = {'render_modes': ['human', 'ansi'], 'render_fps': 1}
+    
+    def __init__(
+        self,
+        num_players: int = 4,
+        agent_player_id: int = 0,
+        opponent_policies: Optional[List[Callable]] = None,
+        max_turns: int = 1000,
+        render_mode: Optional[str] = None,
+        seed: Optional[int] = None
+    ):
+        super().__init__()
+        
+        self.num_players = num_players
+        self.agent_player_id = agent_player_id
         self.max_turns = max_turns
-        # Placeholder spaces; replace with concrete spaces once observation/action schemas are decided.
-        self.action_space = None
-        self.observation_space = None
-        self.engine: GameEngine = None
-        self.current_player_id = 0
+        self.render_mode = render_mode
+        self._seed = seed or 42
+        
+        # Initialize game components
+        self.board = Board.load_standard_board()
+        self.property_specs = load_property_specs()
+        self.chance_cards = load_chance_cards()
+        self.community_cards = load_community_cards()
+        self.rules_engine = RulesEngine(
+            self.board, self.property_specs, self.chance_cards, self.community_cards
+        )
+        
+        # Opponent policies (default to random if not provided)
+        self.opponent_policies = opponent_policies or []
+        while len(self.opponent_policies) < num_players - 1:
+            from ..agents.random import RandomAgent
+            self.opponent_policies.append(RandomAgent())
+        
+        # Action space: simplified discrete actions
+        # 0: roll, 1: buy, 2: pass, 3-30: build, 31-58: mortgage, 59-86: unmortgage, 87: pay jail, 88: use jail card, 89: end turn
+        self.n_actions = 90
+        self.action_space = spaces.Discrete(self.n_actions)
+        
+        # Observation space
+        self.observation_space = spaces.Dict({
+            'player_id': spaces.Box(0, num_players-1, shape=(1,), dtype=np.int32),
+            'cash': spaces.Box(0, 100000, shape=(num_players,), dtype=np.float32),
+            'positions': spaces.Box(0, 39, shape=(num_players,), dtype=np.int32),
+            'property_owner': spaces.Box(-1, num_players-1, shape=(28,), dtype=np.int32),
+            'houses': spaces.Box(0, 5, shape=(28,), dtype=np.int32),
+            'mortgaged': spaces.Box(0, 1, shape=(28,), dtype=np.int32),
+            'jail_turns': spaces.Box(0, 10, shape=(num_players,), dtype=np.int32),
+            'get_out_cards': spaces.Box(0, 10, shape=(num_players,), dtype=np.int32),
+            'legal_mask': spaces.Box(0, 1, shape=(self.n_actions,), dtype=np.int32),
+            'turn_number': spaces.Box(0, max_turns, shape=(1,), dtype=np.int32),
+            'last_roll': spaces.Box(1, 6, shape=(2,), dtype=np.int32),
+            'bank_houses': spaces.Box(0, 32, shape=(1,), dtype=np.int32),
+            'bank_hotels': spaces.Box(0, 12, shape=(1,), dtype=np.int32),
+        })
+        
+        # Game state
+        self.state: Optional[GameState] = None
+        self.engine: Optional[GameEngine] = None
+        self._episode_step = 0
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        raise NotImplementedError("MonopolyEnv.reset must be implemented with engine initialization and observation return.")
+        """Reset the environment to initial state."""
+        super().reset(seed=seed)
+        
+        if seed is not None:
+            self._seed = seed
+        
+        # Create initial game state
+        players = []
+        for i in range(self.num_players):
+            players.append(PlayerState(
+                id=i,
+                cash=1500,
+                position=0,
+                properties_owned=set(),
+                houses_on_property={},
+                mortgaged_properties=set(),
+                jail_turns=0,
+                get_out_of_jail_cards=0,
+                status=PlayerStatus.ACTIVE
+            ))
+        
+        properties = [PropertyState(owner=None, houses_count=0, mortgaged=False) for _ in range(28)]
+        
+        self.state = GameState(
+            players=players,
+            properties=properties,
+            chance_deck=DeckState(pointer=0, seed=self._seed),
+            community_deck=DeckState(pointer=0, seed=self._seed + 1),
+            bank_houses_left=32,
+            bank_hotels_left=12,
+            current_player=0,
+            last_roll=None,
+            doubles_count=0,
+            turn_number=0,
+            seed=self._seed
+        )
+        
+        self.engine = GameEngine(self.rules_engine, seed=self._seed)
+        self._episode_step = 0
+        
+        # If agent is not first player, simulate opponent turns until agent's turn
+        while self.state.current_player != self.agent_player_id:
+            self._simulate_opponent_turn()
+        
+        obs = self._get_observation()
+        info = self._get_info()
+        
+        return obs, info
 
-    def step(self, action) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
-        raise NotImplementedError("MonopolyEnv.step must apply action via the GameEngine and return (obs, reward, terminated, truncated, info).")
+    def step(self, action: int) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
+        """Execute one step in the environment."""
+        if self.state is None:
+            raise RuntimeError("Must call reset() before step()")
+        
+        # Ensure it's the agent's turn
+        if self.state.current_player != self.agent_player_id:
+            raise RuntimeError(f"Not agent's turn (current: {self.state.current_player}, agent: {self.agent_player_id})")
+        
+        # Convert discrete action to game action
+        game_action = self._decode_action(action)
+        
+        # Apply action through rules engine
+        reward = 0.0
+        try:
+            old_cash = self.state.players[self.agent_player_id].cash
+            old_properties = len(self.state.players[self.agent_player_id].properties_owned)
+            
+            # Execute the action
+            if game_action['type'] == 'roll':
+                self.state = self.engine.run_turn(self.state)
+            else:
+                self.state, action_reward, done, log = self.rules_engine.apply_action(
+                    self.state, game_action, self.engine.rng
+                )
+                reward += action_reward
+            
+            # Calculate shaped reward
+            new_cash = self.state.players[self.agent_player_id].cash
+            new_properties = len(self.state.players[self.agent_player_id].properties_owned)
+            reward += (new_cash - old_cash) / 1000.0  # Normalize cash changes
+            reward += (new_properties - old_properties) * 0.5  # Reward property acquisition
+            
+        except Exception as e:
+            # If action fails, give negative reward and end episode
+            reward = -10.0
+            print(f"Action failed: {e}")
+        
+        self._episode_step += 1
+        
+        # Simulate opponent turns
+        while (self.state.current_player != self.agent_player_id and 
+               not self._is_game_over()):
+            self._simulate_opponent_turn()
+        
+        # Check termination conditions
+        terminated = self._is_game_over()
+        truncated = self._episode_step >= self.max_turns
+        
+        # Final reward if game ends
+        if terminated:
+            if self.state.players[self.agent_player_id].status == PlayerStatus.ACTIVE:
+                # Agent won or is last standing
+                active_count = sum(1 for p in self.state.players if p.status == PlayerStatus.ACTIVE)
+                if active_count == 1:
+                    reward += 100.0  # Win bonus
+            else:
+                reward -= 50.0  # Bankruptcy penalty
+        
+        obs = self._get_observation()
+        info = self._get_info()
+        
+        return obs, reward, terminated, truncated, info
 
-    def render(self, mode='human') -> None:
-        raise NotImplementedError("MonopolyEnv.render should visualize the game state (text or pygame).")
+    def _decode_action(self, action: int) -> Dict[str, Any]:
+        """Convert discrete action index to game action dict."""
+        if action == 0:
+            return {'type': 'roll'}
+        elif action == 1:
+            # Buy property at current position
+            pos = self.state.players[self.agent_player_id].position
+            tile = self.board.get_tile(pos)
+            return {'type': 'buy', 'property_idx': tile.property_idx}
+        elif action == 2:
+            return {'type': 'pass'}
+        elif 3 <= action <= 30:
+            prop_idx = action - 3
+            return {'type': 'build', 'property_idx': prop_idx}
+        elif 31 <= action <= 58:
+            prop_idx = action - 31
+            return {'type': 'mortgage', 'property_idx': prop_idx}
+        elif 59 <= action <= 86:
+            prop_idx = action - 59
+            return {'type': 'unmortgage', 'property_idx': prop_idx}
+        elif action == 87:
+            return {'type': 'pay_fine'}
+        elif action == 88:
+            return {'type': 'use_jail_card'}
+        elif action == 89:
+            return {'type': 'end_turn'}
+        else:
+            return {'type': 'pass'}
 
-    def close(self) -> None:
-        # No-op by default; override if resources (e.g., pygame) need explicit cleanup.
+    def _get_observation(self) -> Dict[str, Any]:
+        """Generate observation from current game state."""
+        obs = {
+            'player_id': np.array([self.agent_player_id], dtype=np.int32),
+            'cash': np.array([p.cash for p in self.state.players], dtype=np.float32),
+            'positions': np.array([p.position for p in self.state.players], dtype=np.int32),
+            'property_owner': np.array([
+                p.owner if p.owner is not None else -1 
+                for p in self.state.properties
+            ], dtype=np.int32),
+            'houses': np.array([p.houses_count for p in self.state.properties], dtype=np.int32),
+            'mortgaged': np.array([int(p.mortgaged) for p in self.state.properties], dtype=np.int32),
+            'jail_turns': np.array([p.jail_turns for p in self.state.players], dtype=np.int32),
+            'get_out_cards': np.array([p.get_out_of_jail_cards for p in self.state.players], dtype=np.int32),
+            'legal_mask': self._get_legal_mask(),
+            'turn_number': np.array([self.state.turn_number], dtype=np.int32),
+            'last_roll': np.array(self.state.last_roll if self.state.last_roll else [1, 1], dtype=np.int32),
+            'bank_houses': np.array([self.state.bank_houses_left], dtype=np.int32),
+            'bank_hotels': np.array([self.state.bank_hotels_left], dtype=np.int32),
+        }
+        return obs
+
+    def _get_legal_mask(self) -> np.ndarray:
+        """Compute binary mask of legal actions."""
+        mask = np.zeros(self.n_actions, dtype=np.int32)
+        player = self.state.players[self.agent_player_id]
+        
+        # Always can roll if it's start of turn
+        if self.state.last_roll is None or self.state.current_player == self.agent_player_id:
+            mask[0] = 1  # roll
+        
+        # Check if on buyable property
+        pos = player.position
+        tile = self.board.get_tile(pos)
+        if tile.property_idx is not None:
+            prop = self.state.properties[tile.property_idx]
+            spec = self.property_specs[tile.property_idx]
+            
+            if prop.owner is None and player.cash >= spec.price:
+                mask[1] = 1  # buy
+            mask[2] = 1  # pass (always legal)
+        else:
+            mask[2] = 1  # pass
+        
+        # Building houses (simplified: check monopoly and cash)
+        for prop_idx in player.properties_owned:
+            if self.rules_engine._has_monopoly(self.state, prop_idx, self.agent_player_id):
+                spec = self.property_specs[prop_idx]
+                prop = self.state.properties[prop_idx]
+                if (prop.houses_count < 5 and 
+                    player.cash >= spec.house_cost and 
+                    not prop.mortgaged):
+                    mask[3 + prop_idx] = 1  # build
+        
+        # Mortgage actions
+        for prop_idx in player.properties_owned:
+            prop = self.state.properties[prop_idx]
+            if not prop.mortgaged and prop.houses_count == 0:
+                mask[31 + prop_idx] = 1  # mortgage
+            elif prop.mortgaged:
+                spec = self.property_specs[prop_idx]
+                unmortgage_cost = int(spec.mortgage_value * 1.1)
+                if player.cash >= unmortgage_cost:
+                    mask[59 + prop_idx] = 1  # unmortgage
+        
+        # Jail actions
+        if player.jail_turns > 0:
+            if player.cash >= 50:
+                mask[87] = 1  # pay fine
+            if player.get_out_of_jail_cards > 0:
+                mask[88] = 1  # use card
+        
+        # End turn (always legal as fallback)
+        mask[89] = 1
+        
+        return mask
+
+    def _simulate_opponent_turn(self):
+        """Simulate one turn for an opponent using their policy."""
+        if self._is_game_over():
+            return
+        
+        current_player = self.state.current_player
+        if current_player == self.agent_player_id:
+            return
+        
+        # Get opponent policy
+        policy_idx = current_player if current_player < self.agent_player_id else current_player - 1
+        if policy_idx < len(self.opponent_policies):
+            policy = self.opponent_policies[policy_idx]
+            
+            # Simple: just roll and let engine handle turn
+            self.state = self.engine.run_turn(self.state)
+        else:
+            # Fallback: just advance turn
+            self.state.current_player = (self.state.current_player + 1) % self.num_players
+            self.state.turn_number += 1
+
+    def _is_game_over(self) -> bool:
+        """Check if game has ended."""
+        active_players = [p for p in self.state.players if p.status == PlayerStatus.ACTIVE]
+        return len(active_players) <= 1
+
+    def _get_info(self) -> Dict[str, Any]:
+        """Get additional info dict."""
+        return {
+            'turn_number': self.state.turn_number,
+            'episode_step': self._episode_step,
+            'current_player': self.state.current_player,
+            'agent_cash': self.state.players[self.agent_player_id].cash,
+            'agent_properties': len(self.state.players[self.agent_player_id].properties_owned),
+            'active_players': sum(1 for p in self.state.players if p.status == PlayerStatus.ACTIVE),
+        }
+
+    def render(self):
+        """Render the current game state."""
+        if self.render_mode == 'human' or self.render_mode == 'ansi':
+            print(f"\n{'='*60}")
+            print(f"Turn {self.state.turn_number} | Current Player: {self.state.current_player}")
+            print(f"{'='*60}")
+            for i, player in enumerate(self.state.players):
+                marker = "🤖" if i == self.agent_player_id else "🎮"
+                status = "💀" if player.status == PlayerStatus.BANKRUPT else "✓"
+                print(f"{marker} Player {i}: ${player.cash} | Pos: {player.position} | "
+                      f"Props: {len(player.properties_owned)} | Jail: {player.jail_turns} | {status}")
+            print(f"{'='*60}\n")
+
+    def close(self):
+        """Clean up resources."""
         pass
-
-    def seed(self, seed=None) -> List[int]:
-        raise NotImplementedError("MonopolyEnv.seed should set RNG seed for reproducibility.")
-
-    def compute_observation(self, player_id: int) -> Dict:
-        raise NotImplementedError("Compute and return observation for the given player_id.")
-
-    def compute_legal_actions_mask(self, player_id: int) -> np.ndarray:
-        raise NotImplementedError("Return a boolean mask of legal actions for the current player.")

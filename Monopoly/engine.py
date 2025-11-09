@@ -28,6 +28,13 @@ class GameEngine:
     def __init__(self, rules_engine: RulesEngine, seed: int = 42):
         self.rules_engine = rules_engine
         self.rng = random.Random(seed)
+        # Expose board and other components for card effects
+        self.board = rules_engine.board
+        self.property_specs = rules_engine.property_specs
+    
+    def calculate_rent(self, state: GameState, property_idx: int, dice_roll=None) -> int:
+        """Wrapper to expose calculate_rent for card effects."""
+        return self.rules_engine.calculate_rent(state, property_idx, dice_roll)
 
     def run_turn(self, state: GameState) -> GameState:
         player_id = state.current_player
