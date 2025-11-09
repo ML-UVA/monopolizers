@@ -46,7 +46,7 @@ def test_trade_proposal_execution(sample_state):
     )
     new_state = proposal.execute(sample_state)
     assert new_state.players[0].cash == 450  # 500 - 100 + 50
-    assert new_state.players[1].cash == 450  # 300 + 100 - 50
+    assert new_state.players[1].cash == 350  # 300 + 100 - 50
     assert 1 not in new_state.players[0].properties_owned
     assert 3 in new_state.players[0].properties_owned
     assert 1 in new_state.players[1].properties_owned
@@ -83,7 +83,7 @@ def test_trade_manager_accept_trade(sample_state):
     )
     new_state = manager.accept_trade(sample_state, proposal)
     assert new_state.players[0].cash == 450
-    assert new_state.players[1].cash == 450
+    assert new_state.players[1].cash == 350
 
 def test_trade_manager_decline_trade(sample_state):
     manager = TradeManager()

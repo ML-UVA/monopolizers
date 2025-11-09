@@ -13,6 +13,9 @@ class PropertySpec:
 
     def rent_for(self, houses: int, monopoly: bool, dice_roll: Optional[int] = None) -> int:
         if self.group in ["Purple", "Light Blue", "Pink", "Orange", "Red", "Yellow", "Green", "Dark Blue"]:
+            # If monopoly (owner owns all in group) and there are no houses, base rent is doubled
+            if monopoly and houses == 0:
+                return self.rent_table[0] * 2
             return self.rent_table[houses]
         elif self.group == "Railroad":
             if 1 <= houses <= 4:

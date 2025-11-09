@@ -6,6 +6,17 @@ class GreedyAgent:
 
     def act(self, observation: Dict) -> Dict:  # returns an Action dict
         legal_actions = observation.get('legal_actions', [])
+        # If there are buy actions but none are affordable, prefer 'pass'
+        buy_actions = [a for a in legal_actions if a.get('type') == 'buy']
+        if buy_actions:
+            affordable = any(observation.get('player_cash', 0) > (a.get('cost', 0) + self.safety_margin) for a in buy_actions)
+            if not affordable:
+                # return the first explicit 'pass' action if present, else empty
+                for a in legal_actions:
+                    if a.get('type') == 'pass':
+                        return a
+                return {}
+
         best_action = None
         best_value = -float('inf')
         for action in legal_actions:

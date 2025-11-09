@@ -45,6 +45,7 @@ class TileSpec:
     def is_free_parking(self) -> bool:
         return self.kind == TileKind.FREE_PARKING
 
+@dataclass
 class Board:
     tiles: List[TileSpec]
     board_size: int

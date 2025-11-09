@@ -1,5 +1,5 @@
 from typing import Optional, Callable, Any, Dict
-from .state import GameState
+from ..state import GameState
 import math
 import time
 import numpy as np

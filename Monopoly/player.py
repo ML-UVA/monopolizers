@@ -4,15 +4,16 @@ from .board import Board
 class PlayerUtils:
     @staticmethod
     def can_afford(player: PlayerState, amount: int) -> bool:
-        return player.money >= amount
+        # PlayerState uses `cash` as the balance field
+        return player.cash >= amount
 
     @staticmethod
     def pay(player: PlayerState, amount: int) -> None:  # mutates PlayerState
-        player.money -= amount
+        player.cash -= amount
 
     @staticmethod
     def receive(player: PlayerState, amount: int) -> None:
-        player.money += amount
+        player.cash += amount
 
     @staticmethod
     def move(player: PlayerState, steps: int, board: Board) -> int:  # returns new position
