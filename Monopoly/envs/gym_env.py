@@ -8,6 +8,7 @@ from ..state import GameState, PlayerState, PropertyState, DeckState, PlayerStat
 from ..board import Board
 from ..property import load_property_specs
 from ..cards import load_chance_cards, load_community_cards
+from .renderer import MonopolyRenderer
 
 
 """Gymnasium wrapper for the Monopoly game engine.
@@ -106,6 +107,11 @@ class MonopolyEnv(gym.Env):
         self.state: Optional[GameState] = None
         self.engine: Optional[GameEngine] = None
         self._episode_step = 0
+        
+        # Pygame renderer
+        self.renderer: Optional[MonopolyRenderer] = None
+        if self.render_mode == 'human':
+            self.renderer = MonopolyRenderer(self.board, self.property_specs)
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Reset the environment to initial state."""
@@ -366,7 +372,12 @@ class MonopolyEnv(gym.Env):
 
     def render(self):
         """Render the current game state."""
-        if self.render_mode == 'human' or self.render_mode == 'ansi':
+        if self.render_mode == 'human':
+            # Use pygame renderer
+            if self.renderer and self.state:
+                self.renderer.render(self.state, show_stats=True)
+        elif self.render_mode == 'ansi':
+            # Text-based rendering
             print(f"\n{'='*60}")
             print(f"Turn {self.state.turn_number} | Current Player: {self.state.current_player}")
             print(f"{'='*60}")
@@ -379,4 +390,6 @@ class MonopolyEnv(gym.Env):
 
     def close(self):
         """Clean up resources."""
-        pass
+        if self.renderer:
+            self.renderer.close()
+            self.renderer = None
