@@ -11,12 +11,12 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from monopolizers.Monopoly.engine import GameEngine
-from monopolizers.Monopoly.rules import RulesEngine
-from monopolizers.Monopoly.state import GameState, PlayerState, PropertyState, DeckState, PlayerStatus
-from monopolizers.Monopoly.board import Board
-from monopolizers.Monopoly.property import load_property_specs
-from monopolizers.Monopoly.cards import load_chance_cards, load_community_cards
+from Monopoly.engine import GameEngine
+from Monopoly.rules import RulesEngine
+from Monopoly.state import GameState, PlayerState, PropertyState, DeckState, PlayerStatus
+from Monopoly.board import Board
+from Monopoly.property import load_property_specs
+from Monopoly.cards import load_chance_cards, load_community_cards
 
 
 def run_smoke_game(num_players=4, max_turns=50, seed=42):

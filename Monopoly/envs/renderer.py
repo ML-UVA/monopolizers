@@ -110,30 +110,37 @@ class MonopolyRenderer:
         tile_w = self.tile_width
         tile_h = self.tile_height
         board_size = self.board_size
-        
-        # Bottom row (tiles 0-10): right to left
+        # We'll place tiles inside the square [margin, margin+board_size]
+        origin_x = margin
+        origin_y = margin
+
+        # Bottom row (tiles 0-10): right to left. Keep tiles fully inside board.
+        bottom_y = origin_y + board_size - tile_h
         for i in range(11):
-            x = margin + board_size - (i * tile_w)
-            y = margin + board_size
-            positions.append((x, y, tile_w, tile_h))
-        
-        # Left column (tiles 11-19): bottom to top
+            x = origin_x + board_size - tile_w - (i * tile_w)
+            y = bottom_y
+            positions.append((int(x), int(y), int(tile_w), int(tile_h)))
+
+        # Left column (tiles 11-19): bottom to top (excluding corners)
+        left_x = origin_x
         for i in range(1, 10):
-            x = margin
-            y = margin + board_size - (i * tile_h)
-            positions.append((x, y, tile_w, tile_h))
-        
+            x = left_x
+            y = origin_y + board_size - tile_h - (i * tile_h)
+            positions.append((int(x), int(y), int(tile_w), int(tile_h)))
+
         # Top row (tiles 20-30): left to right
+        top_y = origin_y
         for i in range(11):
-            x = margin + (i * tile_w)
-            y = margin
-            positions.append((x, y, tile_w, tile_h))
-        
-        # Right column (tiles 31-39): top to bottom
+            x = origin_x + (i * tile_w)
+            y = top_y
+            positions.append((int(x), int(y), int(tile_w), int(tile_h)))
+
+        # Right column (tiles 31-39): top to bottom (excluding corners)
+        right_x = origin_x + board_size - tile_w
         for i in range(1, 10):
-            x = margin + board_size
-            y = margin + (i * tile_h)
-            positions.append((x, y, tile_w, tile_h))
+            x = right_x
+            y = origin_y + (i * tile_h)
+            positions.append((int(x), int(y), int(tile_w), int(tile_h)))
         
         return positions
     
@@ -314,24 +321,28 @@ class MonopolyRenderer:
                 
                 # Draw player token (circle with number)
                 player_color = COLORS['player_colors'][player_id % len(COLORS['player_colors'])]
-                pygame.draw.circle(self.screen, player_color, (px, py), 12)
-                pygame.draw.circle(self.screen, COLORS['black'], (px, py), 12, 2)
+                # ensure integers
+                px_i = int(px)
+                py_i = int(py)
+                token_radius = 10
+                pygame.draw.circle(self.screen, player_color, (px_i, py_i), token_radius)
+                pygame.draw.circle(self.screen, COLORS['black'], (px_i, py_i), token_radius, 2)
                 
                 # Draw player number
                 player_text = self.font_small.render(str(player_id), True, COLORS['white'])
-                text_rect = player_text.get_rect(center=(px, py))
+                text_rect = player_text.get_rect(center=(px_i, py_i))
                 self.screen.blit(player_text, text_rect)
                 
                 # Draw jail indicator
                 if player.jail_turns > 0:
                     jail_indicator = self.font_tiny.render("🔒", True, COLORS['red'])
-                    self.screen.blit(jail_indicator, (px - 8, py - 20))
+                    self.screen.blit(jail_indicator, (px_i - 8, py_i - 20))
     
     def _draw_stats_panel(self, state: GameState):
         """Draw player statistics panel on the right side."""
-        panel_x = self.board_margin + self.board_size + 20
+        panel_x = self.board_margin + self.board_size + 30
         panel_y = self.board_margin
-        panel_width = self.width - panel_x - 20
+        panel_width = max(220, self.width - panel_x - 20)
         panel_height = self.height - 2 * self.board_margin
         
         # Draw panel background
@@ -343,36 +354,44 @@ class MonopolyRenderer:
         # Draw title
         title = self.font_medium.render("Game Stats", True, COLORS['text'])
         self.screen.blit(title, (panel_x + 10, panel_y + 10))
-        
+
+        # Spacing metrics
+        header_h = self.font_small.get_height() + 6
+        line_h = self.font_tiny.get_height() + 4
+
         # Draw turn number
         turn_text = self.font_small.render(f"Turn: {state.turn_number}", True, COLORS['text'])
-        self.screen.blit(turn_text, (panel_x + 10, panel_y + 45))
-        
+        self.screen.blit(turn_text, (panel_x + 10, panel_y + 10 + header_h))
+
         # Draw current player indicator
         current_text = self.font_small.render(f"Current: P{state.current_player}", True, COLORS['text'])
-        self.screen.blit(current_text, (panel_x + 10, panel_y + 70))
-        
+        self.screen.blit(current_text, (panel_x + 10, panel_y + 10 + header_h + line_h))
+
         # Draw dice roll
+        y_cursor = panel_y + 10 + header_h + 2 * line_h
         if state.last_roll:
             dice_text = self.font_small.render(f"Last Roll: {state.last_roll[0]} + {state.last_roll[1]} = {sum(state.last_roll)}", 
                                                True, COLORS['text'])
-            self.screen.blit(dice_text, (panel_x + 10, panel_y + 95))
-        
+            self.screen.blit(dice_text, (panel_x + 10, y_cursor))
+            y_cursor += line_h
+
         # Draw bank resources
         bank_text = self.font_small.render(f"Houses: {state.bank_houses_left}  Hotels: {state.bank_hotels_left}", 
                                            True, COLORS['text_light'])
-        self.screen.blit(bank_text, (panel_x + 10, panel_y + 120))
-        
+        self.screen.blit(bank_text, (panel_x + 10, y_cursor))
+        y_cursor += line_h
+
         # Draw separator
+        sep_y = y_cursor + 4
         pygame.draw.line(self.screen, COLORS['gray'], 
-                        (panel_x + 10, panel_y + 145), 
-                        (panel_x + panel_width - 10, panel_y + 145), 1)
-        
+                        (panel_x + 10, sep_y), 
+                        (panel_x + panel_width - 10, sep_y), 1)
+        y_cursor = sep_y + 8
+
         # Draw player info
-        y_offset = 160
         for i, player in enumerate(state.players):
             player_color = COLORS['player_colors'][i % len(COLORS['player_colors'])]
-            
+
             # Player header
             player_header = f"Player {i} {'(YOU)' if i == 0 else ''}"
             if player.status == PlayerStatus.BANKRUPT:
@@ -382,49 +401,50 @@ class MonopolyRenderer:
                 header_color = COLORS['green']
             else:
                 header_color = COLORS['text']
-            
+
             header_text = self.font_small.render(player_header, True, header_color)
-            self.screen.blit(header_text, (panel_x + 10, panel_y + y_offset))
-            
+            self.screen.blit(header_text, (panel_x + 10, y_cursor))
+
             # Player color indicator
+            indicator_x = panel_x + panel_width - 26
             pygame.draw.circle(self.screen, player_color, 
-                             (panel_x + panel_width - 20, panel_y + y_offset + 7), 8)
-            
-            y_offset += 25
-            
+                             (indicator_x, y_cursor + header_h // 2), 8)
+
+            y_cursor += header_h
+
             # Player stats (only for active players)
             if player.status == PlayerStatus.ACTIVE:
                 # Cash
-                cash_text = self.font_tiny.render(f"  Cash: ${player.cash}", True, COLORS['text'])
-                self.screen.blit(cash_text, (panel_x + 10, panel_y + y_offset))
-                y_offset += 18
-                
+                cash_text = self.font_tiny.render(f"Cash: ${player.cash}", True, COLORS['text'])
+                self.screen.blit(cash_text, (panel_x + 10, y_cursor))
+                y_cursor += line_h
+
                 # Position
                 pos_name = self.board.get_tile(player.position).name
-                if len(pos_name) > 15:
-                    pos_name = pos_name[:13] + ".."
-                pos_text = self.font_tiny.render(f"  Pos: {pos_name}", True, COLORS['text'])
-                self.screen.blit(pos_text, (panel_x + 10, panel_y + y_offset))
-                y_offset += 18
-                
+                if len(pos_name) > 20:
+                    pos_name = pos_name[:18] + ".."
+                pos_text = self.font_tiny.render(f"Pos: {pos_name}", True, COLORS['text'])
+                self.screen.blit(pos_text, (panel_x + 10, y_cursor))
+                y_cursor += line_h
+
                 # Properties
-                prop_text = self.font_tiny.render(f"  Properties: {len(player.properties_owned)}", True, COLORS['text'])
-                self.screen.blit(prop_text, (panel_x + 10, panel_y + y_offset))
-                y_offset += 18
-                
+                prop_text = self.font_tiny.render(f"Properties: {len(player.properties_owned)}", True, COLORS['text'])
+                self.screen.blit(prop_text, (panel_x + 10, y_cursor))
+                y_cursor += line_h
+
                 # Jail status
                 if player.jail_turns > 0:
-                    jail_text = self.font_tiny.render(f"  In Jail: {player.jail_turns} turns", True, COLORS['red'])
-                    self.screen.blit(jail_text, (panel_x + 10, panel_y + y_offset))
-                    y_offset += 18
-                
+                    jail_text = self.font_tiny.render(f"In Jail: {player.jail_turns} turns", True, COLORS['red'])
+                    self.screen.blit(jail_text, (panel_x + 10, y_cursor))
+                    y_cursor += line_h
+
                 # Get out of jail cards
                 if player.get_out_of_jail_cards > 0:
-                    card_text = self.font_tiny.render(f"  Jail Cards: {player.get_out_of_jail_cards}", True, COLORS['green'])
-                    self.screen.blit(card_text, (panel_x + 10, panel_y + y_offset))
-                    y_offset += 18
-            
-            y_offset += 10  # Space between players
+                    card_text = self.font_tiny.render(f"Jail Cards: {player.get_out_of_jail_cards}", True, COLORS['green'])
+                    self.screen.blit(card_text, (panel_x + 10, y_cursor))
+                    y_cursor += line_h
+
+            y_cursor += line_h // 2  # Space between players
         
         # Draw legend at bottom
         legend_y = panel_y + panel_height - 80

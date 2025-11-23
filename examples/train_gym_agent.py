@@ -8,9 +8,9 @@ This script shows:
 """
 
 import numpy as np
-from monopolizers.Monopoly.envs.gym_env import MonopolyEnv
-from monopolizers.Monopoly.agents.random import RandomAgent
-from monopolizers.Monopoly.agents.greedy import GreedyAgent
+from Monopoly.envs.gym_env import MonopolyEnv
+from Monopoly.agents.random import RandomAgent
+from Monopoly.agents.greedy import GreedyAgent
 
 
 def random_agent_rollout(env, num_episodes=5, render=False):

@@ -12,9 +12,9 @@ import time
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from monopolizers.Monopoly.envs.gym_env import MonopolyEnv
-from monopolizers.Monopoly.agents.random import RandomAgent
-from monopolizers.Monopoly.agents.greedy import GreedyAgent
+from Monopoly.envs.gym_env import MonopolyEnv
+from Monopoly.agents.random import RandomAgent
+from Monopoly.agents.greedy import GreedyAgent
 
 
 def visualize_random_game(num_episodes=3, num_players=4, steps_per_second=2):
