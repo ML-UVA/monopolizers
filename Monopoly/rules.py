@@ -211,10 +211,33 @@ class RulesEngine:
         else:
             return spec.rent_for(houses, monopoly, dice_roll)
 
-    def _has_monopoly(self, state: GameState, property_idx: int, owner: int) -> bool:
+    def _update_monopoly_status(self, state: GameState, property_idx: int):
         group = self.property_specs[property_idx].group
         group_props = [i for i, p in enumerate(self.property_specs) if p.group == group]
-        return all(state.properties[i].owner == owner for i in group_props)
+        owners = {state.properties[i].owner for i in group_props}
+        if len(owners) == 1:
+            owner = owners.pop()
+            state.monopoly_status[group] = owner
+        else:
+            state.monopoly_status[group] = None
+
+    def _has_monopoly(self, state: GameState, property_idx: int, owner: int) -> bool:
+        group = self.property_specs[property_idx].group
+        if group in state.monopoly_status:
+            return state.monopoly_status[group] == owner
+        
+        # Fallback / Initialization
+        group_props = [i for i, p in enumerate(self.property_specs) if p.group == group]
+        is_monopoly = all(state.properties[i].owner == owner for i in group_props)
+        if is_monopoly:
+            state.monopoly_status[group] = owner
+        else:
+            # If we checked and it's not a monopoly, we can't easily say who owns it without checking all
+            # But we know 'owner' doesn't have it.
+            # Let's just run the update logic to be sure
+            self._update_monopoly_status(state, property_idx)
+            
+        return is_monopoly
 
     def buy_property(self, state: GameState, player_id: int, property_idx: int) -> bool:
         player = state.players[player_id]
@@ -223,14 +246,18 @@ class RulesEngine:
             player.cash -= spec.price
             player.properties_owned.add(property_idx)
             state.properties[property_idx].owner = player_id
+            self._update_monopoly_status(state, property_idx)
             return True
         return False
 
     def handle_bankruptcy(self, state: GameState, player_id: int) -> GameState:
         player = state.players[player_id]
         # Transfer properties to bank or creditor if applicable
-        for prop_idx in list(player.properties_owned):
+        # For now, just clear ownership (bankrupt to bank)
+        properties_to_clear = list(player.properties_owned)
+        for prop_idx in properties_to_clear:
             state.properties[prop_idx] = PropertyState(owner=None, houses_count=0, mortgaged=False)
+            self._update_monopoly_status(state, prop_idx)
         player.properties_owned.clear()
         player.status = PlayerStatus.BANKRUPT
         return state

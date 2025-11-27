@@ -77,9 +77,24 @@ class MonopolyEnv(gym.Env):
         
         # Opponent policies (default to random if not provided)
         self.opponent_policies = opponent_policies or []
-        while len(self.opponent_policies) < num_players - 1:
-            from ..agents.random import RandomAgent
-            self.opponent_policies.append(RandomAgent())
+        
+        # Fill missing opponents with RandomAgent and assign player IDs
+        current_opp_idx = 0
+        for i in range(num_players):
+            if i == agent_player_id:
+                continue
+            
+            if current_opp_idx < len(self.opponent_policies):
+                # Use provided policy, ensure player_id is set
+                agent = self.opponent_policies[current_opp_idx]
+                if agent.player_id == -1:
+                    agent.player_id = i
+            else:
+                # Add default RandomAgent
+                from ..agents.random import RandomAgent
+                self.opponent_policies.append(RandomAgent(player_id=i))
+            current_opp_idx += 1
+
         
         # Action space: simplified discrete actions
         # 0: roll, 1: buy, 2: pass, 3-30: build, 31-58: mortgage, 59-86: unmortgage, 87: pay jail, 88: use jail card, 89: end turn
@@ -342,17 +357,57 @@ class MonopolyEnv(gym.Env):
         if current_player == self.agent_player_id:
             return
         
-        # Get opponent policy
-        policy_idx = current_player if current_player < self.agent_player_id else current_player - 1
-        if policy_idx < len(self.opponent_policies):
-            policy = self.opponent_policies[policy_idx]
+        # Find the agent for the current player
+        # self.opponent_policies is a list of agents. We need to find the one with player_id == current_player
+        agent = next((a for a in self.opponent_policies if a.player_id == current_player), None)
+        
+        if agent:
+            # Full turn simulation loop for opponent
+            turn_ended = False
+            steps = 0
+            max_steps = 20  # Prevent infinite loops
             
-            # Simple: just roll and let engine handle turn
-            self.state = self.engine.run_turn(self.state)
+            while not turn_ended and steps < max_steps:
+                legal_actions = self.rules_engine.legal_actions(self.state, current_player)
+                if not legal_actions:
+                    turn_ended = True
+                    break
+                
+                # Agent selects action
+                action = agent.select_action(self.state, legal_actions)
+                
+                # Apply action
+                if action['type'] == 'roll':
+                    # Use engine's run_turn logic for rolling/moving which handles doubles/jail
+                    # But wait, run_turn does the whole move. 
+                    # We should use rules_engine.apply_action for consistency if possible,
+                    # OR use engine.run_turn and then continue the loop.
+                    # The issue is engine.run_turn does NOT return legal actions for buying after landing.
+                    # It just moves.
+                    
+                    # Let's use rules_engine.apply_action for 'roll' which calls move_player etc.
+                    self.state, _, _, _ = self.rules_engine.apply_action(self.state, action, self.engine.rng)
+                else:
+                    self.state, _, _, _ = self.rules_engine.apply_action(self.state, action, self.engine.rng)
+                
+                if action['type'] == 'end_turn':
+                    turn_ended = True
+                
+                # Check if game over during turn
+                if self._is_game_over():
+                    turn_ended = True
+                
+                steps += 1
+                
+            # Force end turn if loop stuck
+            if not turn_ended:
+                self.state.current_player = (self.state.current_player + 1) % self.num_players
+                self.state.turn_number += 1
         else:
-            # Fallback: just advance turn
+            # Fallback if no agent found (shouldn't happen)
             self.state.current_player = (self.state.current_player + 1) % self.num_players
             self.state.turn_number += 1
+
 
     def _is_game_over(self) -> bool:
         """Check if game has ended."""

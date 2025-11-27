@@ -1,90 +1,81 @@
-from typing import Optional, Callable, Any, Dict
-from ..state import GameState
-import math
-import time
-import numpy as np
+from typing import List, Dict, Any, Optional
+from ..state import GameState, PlayerStatus
+from .agent import Agent
+import random
 
-class MCTSNode:
-    def __init__(self, state: GameState, parent=None, action=None):
-        self.state = state
-        self.parent = parent
-        self.action = action
-        self.children = []
-        self.visits = 0
-        self.value = 0.0
-
-    def is_fully_expanded(self, legal_actions):
-        return len(self.children) == len(legal_actions)
-
-    def best_child(self, c=1.4):
-        choices_weights = [
-            (child.value / child.visits) + c * math.sqrt((2 * math.log(self.visits) / child.visits))
-            for child in self.children
-        ]
-        return self.children[np.argmax(choices_weights)]
-
-class MCTSAgent:
-    def __init__(self, rollouts: int, evaluator: Optional[Callable] = None):
+class MCTSAgent(Agent):
+    """
+    MCTS Agent that uses a forward model (cloned engine) to simulate rollouts.
+    Currently implements Flat Monte Carlo Search (1-ply lookahead with rollouts).
+    """
+    
+    def __init__(self, player_id: int, engine: Any, rollouts: int = 20, max_depth: int = 10):
+        super().__init__(player_id)
+        self.engine = engine # Reference to the main game engine (to be cloned)
         self.rollouts = rollouts
-        self.evaluator = evaluator or self._default_evaluator
+        self.max_depth = max_depth
 
-    def act(self, state: GameState) -> Any:  # action
-        root = MCTSNode(state)
-        for _ in range(self.rollouts):
-            node = self._select(root)
-            if not node.state:  # Terminal
-                reward = self.evaluator(node.state)
-            else:
-                node = self._expand(node)
-                reward = self._simulate(node)
-            self._backpropagate(node, reward)
-        return root.best_child(c=0).action
+    def select_action(self, state: GameState, legal_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not legal_actions:
+            return {'type': 'pass'}
+        if len(legal_actions) == 1:
+            return legal_actions[0]
 
-    def set_time_budget(self, seconds):
-        self.rollouts = max(10, int(seconds * 100))  # Estimate rollouts
-
-    def _select(self, node):
-        while node.is_fully_expanded(self._get_legal_actions(node.state)) and node.children:
-            node = node.best_child()
-        return node
-
-    def _expand(self, node):
-        legal_actions = self._get_legal_actions(node.state)
+        action_scores = []
+        
         for action in legal_actions:
-            if action not in [child.action for child in node.children]:
-                new_state = self._apply_action(node.state, action)
-                child = MCTSNode(new_state, node, action)
-                node.children.append(child)
-                return child
-        return node
+            total_score = 0
+            for _ in range(self.rollouts):
+                # Clone state and engine
+                sim_state = state.clone()
+                sim_engine = self.engine.clone()
+                
+                # Apply the candidate action
+                sim_state, reward, done, _ = sim_engine.rules_engine.apply_action(sim_state, action, sim_engine.rng)
+                
+                # Rollout
+                depth = 0
+                cumulative_reward = reward
+                
+                while not done and depth < self.max_depth:
+                    current_player = sim_state.current_player
+                    acts = sim_engine.rules_engine.legal_actions(sim_state, current_player)
+                    if not acts:
+                        break
+                    
+                    # Random policy for rollout
+                    act = random.choice(acts)
+                    sim_state, r, done, _ = sim_engine.rules_engine.apply_action(sim_state, act, sim_engine.rng)
+                    
+                    if current_player == self.player_id:
+                        cumulative_reward += r
+                    
+                    depth += 1
+                
+                # Final evaluation
+                final_value = self._evaluate_state(sim_state)
+                total_score += cumulative_reward + final_value
+            
+            avg_score = total_score / self.rollouts
+            action_scores.append((avg_score, action))
+        
+        # Pick best action
+        action_scores.sort(key=lambda x: x[0], reverse=True)
+        return action_scores[0][1]
 
-    def _simulate(self, node):
-        state = node.state
-        depth = 0
-        while not self._is_terminal(state) and depth < 50:
-            action = np.random.choice(self._get_legal_actions(state))
-            state = self._apply_action(state, action)
-            depth += 1
-        return self.evaluator(state)
-
-    def _backpropagate(self, node, reward):
-        while node:
-            node.visits += 1
-            node.value += reward
-            node = node.parent
-
-    def _default_evaluator(self, state):
-        # Simple: net worth of current player
-        return state.players[state.current_player].cash
-
-    def _get_legal_actions(self, state):
-        # Placeholder: return list of action indices
-        return list(range(10))  # Assume 10 actions
-
-    def _apply_action(self, state, action):
-        # Placeholder: return new state
-        return state
-
-    def _is_terminal(self, state):
-        # Placeholder
-        return False
+    def _evaluate_state(self, state: GameState) -> float:
+        # Simple heuristic: Cash + Asset Value
+        p = state.players[self.player_id]
+        if p.status != PlayerStatus.ACTIVE:
+            return -10000.0
+            
+        asset_value = p.cash
+        
+        for prop_idx in p.properties_owned:
+            spec = self.engine.property_specs[prop_idx]
+            asset_value += spec.mortgage_value
+            # Add house values
+            houses = p.houses_on_property.get(prop_idx, 0)
+            asset_value += houses * spec.house_cost * 0.5 # Sell back value
+            
+        return float(asset_value)

@@ -67,3 +67,10 @@ class GameEngine:
         state.current_player = (state.current_player + 1) % len(state.players)
         state.turn_number += 1
         return state
+
+    def clone(self) -> 'GameEngine':
+        # Create a new engine with the same rules and seed
+        # Note: We don't need to deepcopy rules_engine as it is stateless (mostly)
+        new_engine = GameEngine(self.rules_engine, seed=0)
+        new_engine.rng.setstate(self.rng.getstate())
+        return new_engine

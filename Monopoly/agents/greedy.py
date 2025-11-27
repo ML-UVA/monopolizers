@@ -1,40 +1,58 @@
-from typing import Dict, Any
+from typing import List, Dict, Any
+from ..state import GameState
+from .agent import Agent
 
-class GreedyAgent:
-    def __init__(self, safety_margin: int = 50):
+class GreedyAgent(Agent):
+    """Agent that uses simple heuristics to maximize assets."""
+    
+    def __init__(self, player_id: int = -1, safety_margin: int = 50):
+        super().__init__(player_id)
         self.safety_margin = safety_margin
 
-    def act(self, observation: Dict) -> Dict:  # returns an Action dict
-        legal_actions = observation.get('legal_actions', [])
-        # If there are buy actions but none are affordable, prefer 'pass'
-        buy_actions = [a for a in legal_actions if a.get('type') == 'buy']
-        if buy_actions:
-            affordable = any(observation.get('player_cash', 0) > (a.get('cost', 0) + self.safety_margin) for a in buy_actions)
-            if not affordable:
-                # return the first explicit 'pass' action if present, else empty
-                for a in legal_actions:
-                    if a.get('type') == 'pass':
-                        return a
-                return {}
+    def select_action(self, state: GameState, legal_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not legal_actions:
+            return {'type': 'pass'}
 
-        best_action = None
-        best_value = -float('inf')
-        for action in legal_actions:
-            value = self._evaluate_action(action, observation)
-            if value > best_value:
-                best_value = value
-                best_action = action
-        return best_action or {}
+        player = state.players[self.player_id]
+        
+        # 1. Always buy if affordable and safe
+        buy_action = next((a for a in legal_actions if a['type'] == 'buy'), None)
+        if buy_action:
+            cost = buy_action.get('cost', 0)
+            if player.cash >= cost + self.safety_margin:
+                return buy_action
 
-    def reset(self):  # optional
-        pass
+        # 2. Build houses if affordable and safe
+        build_action = next((a for a in legal_actions if a['type'] == 'build'), None)
+        if build_action:
+            cost = build_action.get('cost', 0)
+            if player.cash >= cost + self.safety_margin:
+                return build_action
+        
+        # 3. Unmortgage if very rich
+        unmortgage_action = next((a for a in legal_actions if a['type'] == 'unmortgage'), None)
+        if unmortgage_action:
+            cost = unmortgage_action.get('cost', 0)
+            if player.cash >= cost + 500:  # High buffer for unmortgaging
+                return unmortgage_action
 
-    def _evaluate_action(self, action: Dict, observation: Dict) -> float:
-        # Heuristic: prefer actions that increase cash or properties
-        if action.get('type') == 'buy':
-            cost = action.get('cost', 0)
-            if observation['player_cash'] > cost + self.safety_margin:
-                return 100  # High value for buying
-        elif action.get('type') == 'collect_rent':
-            return 50
-        return 0
+        # 4. Get out of jail
+        if player.jail_turns > 0:
+            # Use card if available
+            use_card = next((a for a in legal_actions if a['type'] == 'use_jail_card'), None)
+            if use_card:
+                return use_card
+            # Pay fine if rich
+            pay_fine = next((a for a in legal_actions if a['type'] == 'pay_fine'), None)
+            if pay_fine and player.cash >= 100:
+                return pay_fine
+
+        # 5. Default: Roll or Pass or End Turn
+        # Prefer Roll > End Turn > Pass
+        for type_pref in ['roll', 'end_turn', 'pass']:
+            action = next((a for a in legal_actions if a['type'] == type_pref), None)
+            if action:
+                return action
+        
+        # Fallback
+        return legal_actions[0]

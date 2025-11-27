@@ -7,7 +7,13 @@ This script shows:
 3. Integration pattern for stable-baselines3 (commented out if not installed)
 """
 
+import sys
+from pathlib import Path
 import numpy as np
+
+# Ensure repo root is on sys.path so `Monopoly` package can be imported
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from Monopoly.envs.gym_env import MonopolyEnv
 from Monopoly.agents.random import RandomAgent
 from Monopoly.agents.greedy import GreedyAgent
@@ -111,8 +117,8 @@ def train_with_stable_baselines3(env, total_timesteps=10000):
         model.learn(total_timesteps=total_timesteps, callback=eval_callback)
         
         # Save final model
-        model.save("monopoly_ppo_final")
-        print("\nTraining complete! Model saved as 'monopoly_ppo_final'")
+        model.save("models/monopoly_ppo_final")
+        print("\nTraining complete! Model saved as 'models/monopoly_ppo_final'")
         
         # Evaluate trained model
         print("\nEvaluating trained model...")
@@ -230,7 +236,7 @@ def main():
     
     # Train with SB3 (if available)
     # Uncomment the following line to train with stable-baselines3
-    # model = train_with_stable_baselines3(env, total_timesteps=10000)
+    model = train_with_stable_baselines3(env, total_timesteps=10000)
     
     print("\n" + "="*60)
     print("Example complete!")

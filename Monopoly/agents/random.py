@@ -1,15 +1,20 @@
 import numpy as np
-from typing import Any
+from typing import List, Dict, Any
+from ..state import GameState
+from .agent import Agent
 
-class RandomAgent:
-    def __init__(self):
+class RandomAgent(Agent):
+    """Agent that selects actions randomly."""
+    
+    def __init__(self, player_id: int = -1):
+        super().__init__(player_id)
         self.rng = np.random.default_rng()
 
-    def act(self, observation, legal_mask) -> Any:  # action index
-        legal_indices = np.where(legal_mask)[0]
-        if len(legal_indices) > 0:
-            return self.rng.choice(legal_indices)
-        return 0  # Default if no legal actions
-
-    def reset(self):
-        pass
+    def select_action(self, state: GameState, legal_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not legal_actions:
+            return {'type': 'pass'}
+        
+        # Randomly choose an action
+        # We can just pick a random index
+        choice_idx = self.rng.integers(0, len(legal_actions))
+        return legal_actions[choice_idx]
