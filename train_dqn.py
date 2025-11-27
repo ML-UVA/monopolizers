@@ -5,13 +5,19 @@ Stable-Baselines3 DQN Training Script for Monopoly
 This script provides a complete training pipeline for training a DQN agent
 to play Monopoly using the Stable-Baselines3 library.
 
-Features:
-- DQN with configurable hyperparameters
-- Action masking for legal move enforcement
-- Tensorboard logging
-- Checkpoint saving
-- Evaluation during training
-- Model loading and evaluation
+Four-Player Mode:
+- Player 0: RL Agent (DQN - generates training data)
+- Player 1: Random Bot
+- Player 2: MCTS Bot
+- Player 3: Greedy Bot
+
+Reward System (Net Worth Based):
+- No reward for winning/losing
+- Reward = agent_net_worth / sum(other_active_players_net_worth)
+- Net worth = cash + sum(property_values)
+- Property value = (base_price - mortgage_value) * bonus + houses * house_cost + hotels * hotel_cost
+- Bonus = 1.5 (no monopoly) or 2.0 (has monopoly)
+- Mortgaged properties have value 0
 
 Requirements:
     pip install stable-baselines3 tensorboard gymnasium numpy
@@ -49,9 +55,15 @@ from stable_baselines3.common.monitor import Monitor
 
 # Monopoly Environment
 from Monopoly.envs.gym_env import MonopolyEnv
-from Monopoly.envs.wrappers import MonopolyFlattenWrapper, RewardShapingWrapper
+from Monopoly.envs.wrappers import MonopolyFlattenWrapper
 from Monopoly.agents.random import RandomAgent
 from Monopoly.agents.greedy import GreedyAgent
+from Monopoly.agents.mcts import MCTSAgent
+from Monopoly.engine import GameEngine
+from Monopoly.rules import RulesEngine
+from Monopoly.board import Board
+from Monopoly.property import load_property_specs
+from Monopoly.cards import load_chance_cards, load_community_cards
 
 
 # ============================================================================
@@ -66,8 +78,7 @@ class TensorboardCallback(BaseCallback):
         super().__init__(verbose)
         self.episode_rewards = []
         self.episode_lengths = []
-        self.episode_cash = []
-        self.episode_properties = []
+        self.episode_net_worths = []
         
     def _on_step(self) -> bool:
         # Log episode info when available
@@ -84,11 +95,12 @@ class TensorboardCallback(BaseCallback):
                     self.logger.record('rollout/ep_len_mean_custom', np.mean(self.episode_lengths[-100:]))
                     
                 # Log game-specific info
+                if 'agent_net_worth' in info:
+                    self.episode_net_worths.append(info['agent_net_worth'])
+                    self.logger.record('game/agent_net_worth', info['agent_net_worth'])
                 if 'agent_cash' in info:
-                    self.episode_cash.append(info['agent_cash'])
                     self.logger.record('game/agent_cash', info['agent_cash'])
                 if 'agent_properties' in info:
-                    self.episode_properties.append(info['agent_properties'])
                     self.logger.record('game/agent_properties', info['agent_properties'])
         
         return True
@@ -110,52 +122,75 @@ class ActionMaskCallback(BaseCallback):
 # Environment Factory Functions
 # ============================================================================
 
+def create_opponent_agents(seed: int = 42) -> list:
+    """
+    Create the three opponent agents for 4-player mode:
+    - Player 1: Random Bot
+    - Player 2: MCTS Bot (with lightweight engine for simulations)
+    - Player 3: Greedy Bot
+    
+    Args:
+        seed: Random seed for reproducibility
+        
+    Returns:
+        List of opponent agents
+    """
+    # Create a lightweight engine for MCTS simulations
+    board = Board.load_standard_board()
+    property_specs = load_property_specs()
+    chance_cards = load_chance_cards()
+    community_cards = load_community_cards()
+    rules_engine = RulesEngine(board, property_specs, chance_cards, community_cards)
+    mcts_engine = GameEngine(rules_engine, seed=seed)
+    
+    opponents = [
+        RandomAgent(player_id=1),
+        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=5, max_depth=5),  # Lightweight MCTS
+        GreedyAgent(player_id=3),
+    ]
+    
+    return opponents
+
+
 def make_monopoly_env(
-    num_players: int = 2,
+    num_players: int = 4,
     agent_player_id: int = 0,
-    opponent_type: str = 'random',
     max_turns: int = 500,
     seed: Optional[int] = None,
     flatten: bool = True,
-    reward_shaping: bool = True
 ) -> gym.Env:
     """
-    Create a Monopoly environment with optional wrappers.
+    Create a Monopoly environment with 4 players:
+    - Player 0: RL Agent
+    - Player 1: Random Bot
+    - Player 2: MCTS Bot
+    - Player 3: Greedy Bot
+    
+    Uses net worth-based reward system (no win/lose rewards).
     
     Args:
-        num_players: Number of players (2-4)
-        agent_player_id: Player ID for the RL agent
-        opponent_type: Type of opponent ('random', 'greedy')
+        num_players: Number of players (always 4 for this setup)
+        agent_player_id: Player ID for the RL agent (always 0)
         max_turns: Maximum turns before truncation
         seed: Random seed
         flatten: Whether to flatten observations
-        reward_shaping: Whether to apply reward shaping
         
     Returns:
         Gymnasium environment
     """
     # Create opponent agents
-    opponents = []
-    for i in range(num_players):
-        if i != agent_player_id:
-            if opponent_type == 'greedy':
-                opponents.append(GreedyAgent(player_id=i))
-            else:
-                opponents.append(RandomAgent(player_id=i))
+    opponents = create_opponent_agents(seed=seed or 42)
     
     # Create base environment
     env = MonopolyEnv(
-        num_players=num_players,
-        agent_player_id=agent_player_id,
+        num_players=4,
+        agent_player_id=0,
         opponent_policies=opponents,
         max_turns=max_turns,
         seed=seed
     )
     
-    # Apply wrappers
-    if reward_shaping:
-        env = RewardShapingWrapper(env, cash_weight=0.001, property_weight=0.5, survival_bonus=0.01)
-    
+    # Apply flatten wrapper (no reward shaping - using net worth reward)
     if flatten:
         env = MonopolyFlattenWrapper(env)
     
@@ -167,8 +202,6 @@ def make_monopoly_env(
 
 def make_vec_env(
     n_envs: int = 1,
-    num_players: int = 2,
-    opponent_type: str = 'random',
     max_turns: int = 500,
     seed: Optional[int] = None
 ) -> VecMonitor:
@@ -177,8 +210,6 @@ def make_vec_env(
     
     Args:
         n_envs: Number of parallel environments
-        num_players: Number of players per game
-        opponent_type: Type of opponent
         max_turns: Maximum turns
         seed: Base random seed
         
@@ -189,8 +220,6 @@ def make_vec_env(
         def _init() -> gym.Env:
             env_seed = seed + env_id if seed is not None else None
             return make_monopoly_env(
-                num_players=num_players,
-                opponent_type=opponent_type,
                 max_turns=max_turns,
                 seed=env_seed
             )
@@ -273,8 +302,6 @@ def get_dqn_config(preset: str = 'default') -> Dict[str, Any]:
 
 def train_dqn(
     total_timesteps: int = 100000,
-    num_players: int = 2,
-    opponent_type: str = 'random',
     max_turns: int = 500,
     config_preset: str = 'default',
     save_path: str = 'models',
@@ -285,12 +312,18 @@ def train_dqn(
     verbose: int = 1
 ) -> DQN:
     """
-    Train a DQN agent to play Monopoly.
+    Train a DQN agent to play Monopoly in 4-player mode.
+    
+    Players:
+    - Player 0: RL Agent (DQN)
+    - Player 1: Random Bot
+    - Player 2: MCTS Bot
+    - Player 3: Greedy Bot
+    
+    Reward: Net worth relative to other players (no win/lose bonus)
     
     Args:
         total_timesteps: Total training timesteps
-        num_players: Number of players (2-4)
-        opponent_type: Type of opponent ('random', 'greedy')
         max_turns: Maximum turns per episode
         config_preset: Hyperparameter preset
         save_path: Path to save models
@@ -304,11 +337,11 @@ def train_dqn(
         Trained DQN model
     """
     print("=" * 60)
-    print("Monopoly DQN Training")
+    print("Monopoly DQN Training (4-Player Mode)")
     print("=" * 60)
     print(f"Total timesteps: {total_timesteps}")
-    print(f"Players: {num_players}")
-    print(f"Opponent type: {opponent_type}")
+    print(f"Players: 4 (RL Agent vs Random, MCTS, Greedy)")
+    print(f"Reward: Net worth relative to opponents")
     print(f"Config preset: {config_preset}")
     print(f"Seed: {seed}")
     print("=" * 60)
@@ -321,8 +354,6 @@ def train_dqn(
     print("\nCreating training environment...")
     train_env = make_vec_env(
         n_envs=1,
-        num_players=num_players,
-        opponent_type=opponent_type,
         max_turns=max_turns,
         seed=seed
     )
@@ -331,8 +362,6 @@ def train_dqn(
     print("Creating evaluation environment...")
     eval_env = make_vec_env(
         n_envs=1,
-        num_players=num_players,
-        opponent_type=opponent_type,
         max_turns=max_turns,
         seed=seed + 1000
     )
@@ -417,21 +446,17 @@ def train_dqn(
 def evaluate_model(
     model_path: str,
     num_episodes: int = 100,
-    num_players: int = 2,
-    opponent_type: str = 'random',
     max_turns: int = 500,
     seed: int = 42,
     render: bool = False,
     verbose: bool = True
 ) -> Dict[str, float]:
     """
-    Evaluate a trained DQN model.
+    Evaluate a trained DQN model in 4-player mode.
     
     Args:
         model_path: Path to the saved model
         num_episodes: Number of evaluation episodes
-        num_players: Number of players
-        opponent_type: Type of opponent
         max_turns: Maximum turns per episode
         seed: Random seed
         render: Whether to render games
@@ -441,11 +466,11 @@ def evaluate_model(
         Dictionary of evaluation metrics
     """
     print("=" * 60)
-    print("Evaluating Monopoly DQN Agent")
+    print("Evaluating Monopoly DQN Agent (4-Player Mode)")
     print("=" * 60)
     print(f"Model: {model_path}")
     print(f"Episodes: {num_episodes}")
-    print(f"Opponent: {opponent_type}")
+    print(f"Opponents: Random, MCTS, Greedy")
     print("=" * 60)
     
     # Load model
@@ -453,18 +478,16 @@ def evaluate_model(
     
     # Create evaluation environment
     env = make_monopoly_env(
-        num_players=num_players,
-        opponent_type=opponent_type,
         max_turns=max_turns,
         seed=seed,
         flatten=True,
-        reward_shaping=False  # No reward shaping for evaluation
     )
     
     # Run evaluation
     episode_rewards = []
     episode_lengths = []
     wins = 0
+    final_net_worths = []
     final_cash = []
     final_properties = []
     
@@ -498,6 +521,7 @@ def evaluate_model(
         episode_lengths.append(episode_length)
         final_cash.append(info.get('agent_cash', 0))
         final_properties.append(info.get('agent_properties', 0))
+        final_net_worths.append(info.get('agent_net_worth', 0))
         
         # Check if agent won
         if info.get('agent_status') == 'ACTIVE':
@@ -509,7 +533,7 @@ def evaluate_model(
             print(f"Episode {episode + 1}/{num_episodes}: "
                   f"Reward={episode_reward:.2f}, "
                   f"Length={episode_length}, "
-                  f"Cash=${info.get('agent_cash', 0)}")
+                  f"NW=${info.get('agent_net_worth', 0):.0f}")
     
     env.close()
     
@@ -520,6 +544,7 @@ def evaluate_model(
         'mean_length': np.mean(episode_lengths),
         'std_length': np.std(episode_lengths),
         'win_rate': wins / num_episodes,
+        'mean_final_net_worth': np.mean(final_net_worths),
         'mean_final_cash': np.mean(final_cash),
         'mean_final_properties': np.mean(final_properties),
     }
@@ -530,6 +555,7 @@ def evaluate_model(
     print(f"Mean Reward: {results['mean_reward']:.2f} ± {results['std_reward']:.2f}")
     print(f"Mean Episode Length: {results['mean_length']:.1f} ± {results['std_length']:.1f}")
     print(f"Win Rate: {results['win_rate'] * 100:.1f}%")
+    print(f"Mean Final Net Worth: ${results['mean_final_net_worth']:.0f}")
     print(f"Mean Final Cash: ${results['mean_final_cash']:.0f}")
     print(f"Mean Final Properties: {results['mean_final_properties']:.1f}")
     print("=" * 60)
@@ -543,29 +569,26 @@ def evaluate_model(
 
 def run_random_baseline(
     num_episodes: int = 100,
-    num_players: int = 2,
     max_turns: int = 500,
     seed: int = 42
 ) -> Dict[str, float]:
     """
-    Run random agent baseline for comparison.
+    Run random agent baseline for comparison in 4-player mode.
     """
     print("=" * 60)
-    print("Running Random Agent Baseline")
+    print("Running Random Agent Baseline (4-Player Mode)")
     print("=" * 60)
     
     env = make_monopoly_env(
-        num_players=num_players,
-        opponent_type='random',
         max_turns=max_turns,
         seed=seed,
         flatten=True,
-        reward_shaping=False
     )
     
     episode_rewards = []
     episode_lengths = []
     wins = 0
+    final_net_worths = []
     
     for episode in range(num_episodes):
         obs, info = env.reset(seed=seed + episode)
@@ -590,6 +613,7 @@ def run_random_baseline(
         
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
+        final_net_worths.append(info.get('agent_net_worth', 0))
         
         if info.get('agent_status') == 'ACTIVE' and info.get('active_players', 1) == 1:
             wins += 1
@@ -601,11 +625,13 @@ def run_random_baseline(
         'std_reward': np.std(episode_rewards),
         'mean_length': np.mean(episode_lengths),
         'win_rate': wins / num_episodes,
+        'mean_final_net_worth': np.mean(final_net_worths),
     }
     
     print(f"Mean Reward: {results['mean_reward']:.2f} ± {results['std_reward']:.2f}")
     print(f"Mean Episode Length: {results['mean_length']:.1f}")
     print(f"Win Rate: {results['win_rate'] * 100:.1f}%")
+    print(f"Mean Final Net Worth: ${results['mean_final_net_worth']:.0f}")
     print("=" * 60)
     
     return results
@@ -616,7 +642,7 @@ def run_random_baseline(
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Train or evaluate a DQN agent for Monopoly')
+    parser = argparse.ArgumentParser(description='Train or evaluate a DQN agent for Monopoly (4-Player Mode)')
     
     # Mode
     parser.add_argument('--train', action='store_true', help='Train a new model')
@@ -629,9 +655,6 @@ def main():
                        choices=['default', 'fast', 'thorough'], help='Hyperparameter preset')
     
     # Environment parameters
-    parser.add_argument('--players', type=int, default=2, choices=[2, 3, 4], help='Number of players')
-    parser.add_argument('--opponent', type=str, default='random', 
-                       choices=['random', 'greedy'], help='Opponent type')
     parser.add_argument('--max-turns', type=int, default=500, help='Maximum turns per episode')
     
     # Evaluation parameters
@@ -648,8 +671,6 @@ def main():
     if args.train:
         train_dqn(
             total_timesteps=args.timesteps,
-            num_players=args.players,
-            opponent_type=args.opponent,
             max_turns=args.max_turns,
             config_preset=args.config,
             seed=args.seed,
@@ -660,8 +681,6 @@ def main():
         evaluate_model(
             model_path=args.model,
             num_episodes=args.episodes,
-            num_players=args.players,
-            opponent_type=args.opponent,
             max_turns=args.max_turns,
             seed=args.seed
         )
@@ -669,7 +688,6 @@ def main():
     if args.baseline:
         run_random_baseline(
             num_episodes=args.episodes,
-            num_players=args.players,
             max_turns=args.max_turns,
             seed=args.seed
         )
@@ -677,6 +695,12 @@ def main():
     if not (args.train or args.evaluate or args.baseline):
         print("Please specify --train, --evaluate, or --baseline")
         print("Run with --help for usage information")
+        print("\n4-Player Mode:")
+        print("  Player 0: RL Agent (DQN)")
+        print("  Player 1: Random Bot")
+        print("  Player 2: MCTS Bot")
+        print("  Player 3: Greedy Bot")
+        print("\nReward: Net worth relative to other active players")
 
 
 if __name__ == "__main__":

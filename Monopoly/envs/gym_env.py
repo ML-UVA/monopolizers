@@ -14,7 +14,16 @@ from .renderer import MonopolyRenderer
 """Gymnasium wrapper for the Monopoly game engine.
 
 This environment provides a single-agent interface where one player is controlled
-by an RL agent and opponents follow fixed policies (e.g., random, greedy).
+by an RL agent and opponents follow fixed policies (e.g., random, greedy, MCTS).
+
+Four-player mode:
+- Player 0: RL Agent (generates training data)
+- Player 1: Random Bot
+- Player 2: MCTS Bot  
+- Player 3: Greedy Bot
+
+Reward system based on relative net worth:
+r_x = nw_x / sum(nw_other_active_players)
 """
 
 
@@ -45,6 +54,7 @@ class MonopolyEnv(gym.Env):
         - legal_mask: Box (n_actions,) - binary legal action mask
         - turn_number: Box - current turn
         - last_roll: Box (2,) - last dice roll
+        - net_worth: Box (n_players,) - computed net worth for each player
     """
     
     metadata = {'render_modes': ['human', 'ansi'], 'render_fps': 1}
@@ -101,7 +111,7 @@ class MonopolyEnv(gym.Env):
         self.n_actions = 90
         self.action_space = spaces.Discrete(self.n_actions)
         
-        # Observation space
+        # Observation space (includes net_worth for all players)
         self.observation_space = spaces.Dict({
             'player_id': spaces.Box(0, num_players-1, shape=(1,), dtype=np.int32),
             'cash': spaces.Box(0, 100000, shape=(num_players,), dtype=np.float32),
@@ -116,6 +126,7 @@ class MonopolyEnv(gym.Env):
             'last_roll': spaces.Box(1, 6, shape=(2,), dtype=np.int32),
             'bank_houses': spaces.Box(0, 32, shape=(1,), dtype=np.int32),
             'bank_hotels': spaces.Box(0, 12, shape=(1,), dtype=np.int32),
+            'net_worth': spaces.Box(0, 100000, shape=(num_players,), dtype=np.float32),
         })
         
         # Game state
@@ -127,6 +138,99 @@ class MonopolyEnv(gym.Env):
         self.renderer: Optional[MonopolyRenderer] = None
         if self.render_mode == 'human':
             self.renderer = MonopolyRenderer(self.board, self.property_specs)
+
+    def _compute_property_value(self, prop_idx: int, player_id: int) -> float:
+        """
+        Compute the value p_a for a property using the formula:
+        p_a = (bp - mv) * b + nh * ph + nH * pH
+        
+        Where:
+        - bp = base price
+        - mv = mortgage value  
+        - b = bonus multiplier (1.5 if not monopoly, 2 if monopoly)
+        - nh = number of houses (0-4)
+        - ph = price per house
+        - nH = number of hotels (0 or 1, represented as houses=5)
+        - pH = price per hotel (same as house cost in standard rules)
+        
+        If property is mortgaged, return 0.
+        """
+        prop = self.state.properties[prop_idx]
+        spec = self.property_specs[prop_idx]
+        
+        # If mortgaged, value is 0
+        if prop.mortgaged:
+            return 0.0
+        
+        bp = spec.price  # base price
+        mv = spec.mortgage_value  # mortgage value
+        
+        # Check if player has monopoly on this property
+        has_monopoly = self.rules_engine._has_monopoly(self.state, prop_idx, player_id)
+        b = 2.0 if has_monopoly else 1.5  # bonus multiplier
+        
+        # Houses and hotels
+        houses_count = prop.houses_count
+        ph = spec.house_cost  # price per house
+        pH = spec.house_cost  # price per hotel (same as house cost)
+        
+        if houses_count == 5:
+            # Has a hotel
+            nh = 0
+            nH = 1
+        else:
+            nh = houses_count
+            nH = 0
+        
+        # Calculate property value
+        p_a = (bp - mv) * b + nh * ph + nH * pH
+        
+        return p_a
+
+    def _compute_net_worth(self, player_id: int) -> float:
+        """
+        Compute net worth for a player:
+        nw_x = c_x + sum(p_a for all owned properties)
+        
+        Where c_x is cash and p_a is computed property value.
+        """
+        player = self.state.players[player_id]
+        
+        # If bankrupt, net worth is 0
+        if player.status == PlayerStatus.BANKRUPT:
+            return 0.0
+        
+        # Cash
+        nw = float(player.cash)
+        
+        # Sum property values
+        for prop_idx in player.properties_owned:
+            nw += self._compute_property_value(prop_idx, player_id)
+        
+        return nw
+
+    def _compute_net_worth_reward(self, player_id: int) -> float:
+        """
+        Compute the relative net worth reward:
+        r_x = nw_x / sum(nw_other_active_players)
+        
+        Returns value between 0 and 1 (can be > 1 if agent dominates).
+        Returns 0 if no other active players (shouldn't happen during game).
+        """
+        agent_nw = self._compute_net_worth(player_id)
+        
+        # Sum net worth of all OTHER active players
+        other_nw_sum = 0.0
+        for i, p in enumerate(self.state.players):
+            if i != player_id and p.status == PlayerStatus.ACTIVE:
+                other_nw_sum += self._compute_net_worth(i)
+        
+        # Avoid division by zero
+        if other_nw_sum <= 0:
+            return 1.0 if agent_nw > 0 else 0.0
+        
+        reward = agent_nw / other_nw_sum
+        return reward
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Reset the environment to initial state."""
@@ -183,7 +287,15 @@ class MonopolyEnv(gym.Env):
         return obs, info
 
     def step(self, action: int) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
-        """Execute one step in the environment."""
+        """Execute one step in the environment.
+        
+        Only the RL agent's actions generate rewards and training data.
+        Opponents take turns but don't contribute to training.
+        
+        Reward system: No reward for winning/losing.
+        Reward is computed as relative net worth only when game is NOT over:
+        r_x = nw_x / sum(nw_other_active_players)
+        """
         if self.state is None:
             raise RuntimeError("Must call reset() before step()")
         
@@ -197,61 +309,45 @@ class MonopolyEnv(gym.Env):
         # Validate action is legal
         legal_mask = self._get_legal_mask()
         if legal_mask[action] == 0:
-            # Invalid action - give small penalty and force pass/end_turn
-            reward = -1.0
+            # Invalid action - force pass/end_turn (no penalty in new reward system)
             if self.state.has_rolled:
                 game_action = {'type': 'end_turn'}
             else:
                 game_action = {'type': 'roll'}
-        else:
-            reward = 0.0
-        
-        # Track state for reward shaping
-        old_cash = self.state.players[self.agent_player_id].cash
-        old_properties = len(self.state.players[self.agent_player_id].properties_owned)
         
         # Apply action through rules engine
         try:
             self.state, action_reward, done, log = self.rules_engine.apply_action(
                 self.state, game_action, self.engine.rng, engine=self.engine
             )
-            reward += action_reward
-            
         except Exception as e:
-            # If action fails, give negative reward
-            reward = -5.0
-            # Force end turn to prevent stuck state
+            # If action fails, force end turn to prevent stuck state
             if self.state.has_rolled:
                 self.state, _, _, _ = self.rules_engine.apply_action(
                     self.state, {'type': 'end_turn'}, self.engine.rng, engine=self.engine
                 )
         
-        # Calculate shaped reward
-        new_cash = self.state.players[self.agent_player_id].cash
-        new_properties = len(self.state.players[self.agent_player_id].properties_owned)
-        reward += (new_cash - old_cash) / 1000.0  # Normalize cash changes
-        reward += (new_properties - old_properties) * 0.5  # Reward property acquisition
-        
         self._episode_step += 1
+        
+        # Compute net worth-based reward ONLY if game is not over
+        # No reward for winning/losing - only relative net worth during game
+        terminated = self._is_game_over()
+        truncated = self._episode_step >= self.max_turns
+        
+        if terminated or truncated:
+            # No reward when game ends
+            reward = 0.0
+        else:
+            # Compute relative net worth reward
+            reward = self._compute_net_worth_reward(self.agent_player_id)
         
         # Simulate opponent turns only if it's no longer the agent's turn
         while (self.state.current_player != self.agent_player_id and 
                not self._is_game_over()):
             self._simulate_opponent_turn()
-        
-        # Check termination conditions
-        terminated = self._is_game_over()
-        truncated = self._episode_step >= self.max_turns
-        
-        # Final reward if game ends
-        if terminated:
-            if self.state.players[self.agent_player_id].status == PlayerStatus.ACTIVE:
-                # Agent won or is last standing
-                active_count = sum(1 for p in self.state.players if p.status == PlayerStatus.ACTIVE)
-                if active_count == 1:
-                    reward += 100.0  # Win bonus
-            else:
-                reward -= 50.0  # Bankruptcy penalty
+            
+            # Recompute termination after opponent turns
+            terminated = self._is_game_over()
         
         obs = self._get_observation()
         info = self._get_info()
@@ -289,6 +385,9 @@ class MonopolyEnv(gym.Env):
 
     def _get_observation(self) -> Dict[str, Any]:
         """Generate observation from current game state."""
+        # Compute net worth for all players
+        net_worths = np.array([self._compute_net_worth(i) for i in range(self.num_players)], dtype=np.float32)
+        
         obs = {
             'player_id': np.array([self.agent_player_id], dtype=np.int32),
             'cash': np.array([p.cash for p in self.state.players], dtype=np.float32),
@@ -306,6 +405,7 @@ class MonopolyEnv(gym.Env):
             'last_roll': np.array(self.state.last_roll if self.state.last_roll else [1, 1], dtype=np.int32),
             'bank_houses': np.array([self.state.bank_houses_left], dtype=np.int32),
             'bank_hotels': np.array([self.state.bank_hotels_left], dtype=np.int32),
+            'net_worth': net_worths,
         }
         return obs
 
@@ -454,6 +554,10 @@ class MonopolyEnv(gym.Env):
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info dict."""
         agent_player = self.state.players[self.agent_player_id]
+        
+        # Compute net worths for info
+        net_worths = {i: self._compute_net_worth(i) for i in range(self.num_players)}
+        
         return {
             'turn_number': self.state.turn_number,
             'episode_step': self._episode_step,
@@ -461,6 +565,8 @@ class MonopolyEnv(gym.Env):
             'agent_cash': agent_player.cash,
             'agent_properties': len(agent_player.properties_owned),
             'agent_status': agent_player.status.value,
+            'agent_net_worth': net_worths[self.agent_player_id],
+            'all_net_worths': net_worths,
             'active_players': sum(1 for p in self.state.players if p.status == PlayerStatus.ACTIVE),
             'has_rolled': self.state.has_rolled,
             'awaiting_buy_decision': self.state.awaiting_buy_decision,
@@ -473,14 +579,15 @@ class MonopolyEnv(gym.Env):
             if self.renderer and self.state:
                 self.renderer.render(self.state, show_stats=True)
         elif self.render_mode == 'ansi':
-            # Text-based rendering
+            # Text-based rendering with net worth
             print(f"\n{'='*60}")
             print(f"Turn {self.state.turn_number} | Current Player: {self.state.current_player}")
             print(f"{'='*60}")
             for i, player in enumerate(self.state.players):
                 marker = "🤖" if i == self.agent_player_id else "🎮"
                 status = "💀" if player.status == PlayerStatus.BANKRUPT else "✓"
-                print(f"{marker} Player {i}: ${player.cash} | Pos: {player.position} | "
+                nw = self._compute_net_worth(i)
+                print(f"{marker} Player {i}: ${player.cash} | NW: ${nw:.0f} | Pos: {player.position} | "
                       f"Props: {len(player.properties_owned)} | Jail: {player.jail_turns} | {status}")
             print(f"{'='*60}\n")
 

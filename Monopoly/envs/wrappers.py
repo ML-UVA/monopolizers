@@ -34,6 +34,7 @@ class MonopolyFlattenWrapper(gym.ObservationWrapper):
         # last_roll: 2
         # bank_houses: 1
         # bank_hotels: 1
+        # net_worth: n_players (NEW)
         
         flat_dim = (
             1 + 
@@ -48,7 +49,8 @@ class MonopolyFlattenWrapper(gym.ObservationWrapper):
             1 + 
             2 + 
             1 + 
-            1
+            1 +
+            self.n_players  # net_worth
         )
         
         self.observation_space = gym.spaces.Box(
@@ -101,6 +103,13 @@ class MonopolyFlattenWrapper(gym.ObservationWrapper):
         
         # bank_hotels: normalize
         flat_list.append(obs['bank_hotels'].flatten() / 12.0)
+        
+        # net_worth: normalize by soft cap (can exceed 1.0 for rich players)
+        if 'net_worth' in obs:
+            flat_list.append(np.clip(obs['net_worth'].flatten() / 10000.0, 0.0, 10.0))
+        else:
+            # Fallback if net_worth not present
+            flat_list.append(np.zeros(self.n_players, dtype=np.float32))
         
         return np.concatenate(flat_list).astype(np.float32)
 
