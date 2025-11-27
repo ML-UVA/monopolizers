@@ -1,16 +1,16 @@
 import pytest
 import numpy as np
-from ..Monopoly.agents.random import RandomAgent
+from Monopoly.agents.random import RandomAgent
 
 def test_random_agent_act():
-    agent = RandomAgent()
+    agent = RandomAgent(player_id=0)
     agent.rng = np.random.default_rng(42)  # For determinism in test
-    legal_mask = np.array([True, False, True, False])
-    action = agent.act(None, legal_mask)
-    assert action in [0, 2]  # Only legal indices
+    legal_actions = [{'type': 'roll'}, {'type': 'pass'}]
+    action = agent.select_action(None, legal_actions)
+    assert action in legal_actions
 
 def test_random_agent_no_legal_actions():
-    agent = RandomAgent()
-    legal_mask = np.array([False, False])
-    action = agent.act(None, legal_mask)
-    assert action == 0  # Default
+    agent = RandomAgent(player_id=0)
+    legal_actions = []
+    action = agent.select_action(None, legal_actions)
+    assert action == {'type': 'pass'}  # Default fallback

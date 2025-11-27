@@ -227,12 +227,23 @@ pytest --cov=Monopoly tests/
 
 ## Documentation
 
+## Quick Commands
+
+```bash
+# Run tests
+pytest tests/
+
+# Baseline evaluation
+python train_dqn.py --baseline --episodes 20
+
+# Train DQN
+python train_dqn.py --train --timesteps 100000
+
+# Monitor training
+tensorboard --logdir tensorboard_logs/
+```
+
 See **[IMPLEMENTATION_ANALYSIS.md](IMPLEMENTATION_ANALYSIS.md)** for:
-- 📋 Complete feature list
-- ⚠️ Known limitations and edge cases
-- 🔧 Recommended fixes
-- 🎯 Priority improvements
-- 📖 Detailed API documentation
 
 ## Contributing
 

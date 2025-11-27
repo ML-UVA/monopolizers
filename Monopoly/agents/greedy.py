@@ -21,6 +21,11 @@ class GreedyAgent(Agent):
             cost = buy_action.get('cost', 0)
             if player.cash >= cost + self.safety_margin:
                 return buy_action
+            else:
+                # Not enough money with safety margin, pass on buying
+                pass_action = next((a for a in legal_actions if a['type'] == 'pass'), None)
+                if pass_action:
+                    return pass_action
 
         # 2. Build houses if affordable and safe
         build_action = next((a for a in legal_actions if a['type'] == 'build'), None)
@@ -47,8 +52,7 @@ class GreedyAgent(Agent):
             if pay_fine and player.cash >= 100:
                 return pay_fine
 
-        # 5. Default: Roll or Pass or End Turn
-        # Prefer Roll > End Turn > Pass
+        # 5. Default: Roll > End Turn > Pass
         for type_pref in ['roll', 'end_turn', 'pass']:
             action = next((a for a in legal_actions if a['type'] == type_pref), None)
             if action:

@@ -67,6 +67,10 @@ class GameState:
     turn_number: int = 0
     seed: int = 0  # global seed for reproducibility
     monopoly_status: Dict[str, Optional[int]] = field(default_factory=dict) # Group -> Owner ID
+    has_rolled: bool = False  # Whether current player has rolled this turn
+    awaiting_buy_decision: bool = False  # Whether player landed on unowned property and must decide
+    pending_rent: int = 0  # Rent owed that must be paid (for bankruptcy handling)
+    rent_creditor: Optional[int] = None  # Player ID who is owed rent
 
     def clone(self) -> 'GameState':
         return GameState(
@@ -81,5 +85,9 @@ class GameState:
             doubles_count=self.doubles_count,
             turn_number=self.turn_number,
             seed=self.seed,
-            monopoly_status=self.monopoly_status.copy()
+            monopoly_status=self.monopoly_status.copy(),
+            has_rolled=self.has_rolled,
+            awaiting_buy_decision=self.awaiting_buy_decision,
+            pending_rent=self.pending_rent,
+            rent_creditor=self.rent_creditor
         )

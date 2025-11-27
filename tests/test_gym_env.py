@@ -43,10 +43,18 @@ def test_legal_action_mask():
     assert legal_mask.shape == (env.n_actions,)
     assert legal_mask.dtype == np.int32
     
-    # Roll should always be legal at start
+    # Roll should always be legal at start of turn (before rolling)
     assert legal_mask[0] == 1
-    # End turn should always be legal
-    assert legal_mask[89] == 1
+    # End turn should NOT be legal before rolling (must roll first)
+    assert legal_mask[89] == 0
+    
+    # After rolling, end turn should be legal
+    obs, _, _, _, _ = env.step(0)  # Roll
+    legal_mask = obs['legal_mask']
+    # After rolling, roll should not be legal (already rolled)
+    # and end turn should be legal (unless awaiting buy decision)
+    if not env.state.awaiting_buy_decision:
+        assert legal_mask[89] == 1
 
 
 def test_env_step():

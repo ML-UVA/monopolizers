@@ -213,8 +213,10 @@ def load_community_cards() -> List[Card]:
         return state, {"collected": 25}
 
     def street_repairs(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
-        # Placeholder: calculate based on houses/hotels
-        cost = 0
+        # Calculate based on houses/hotels - $40 per house, $115 per hotel
+        houses = sum(state.properties[p].houses_count for p in state.players[player_id].properties_owned if state.properties[p].houses_count < 5)
+        hotels = sum(1 for p in state.players[player_id].properties_owned if state.properties[p].houses_count == 5)
+        cost = houses * 40 + hotels * 115
         state.players[player_id].cash -= cost
         return state, {"paid": cost}
 

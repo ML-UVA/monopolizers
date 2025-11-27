@@ -43,30 +43,62 @@ class RulesEngine:
         """
         Return list of legal action dicts for the given player.
         
+        Turn flow:
+        1. Player must roll first (unless in jail with options)
+        2. After rolling and landing, player may buy/pass if on unowned property
+        3. Player may build/mortgage/unmortgage anytime during their turn (after rolling)
+        4. Player must end turn when done
+        
         Returns:
             List of action dicts with 'type' and optional parameters
         """
         actions = []
         player = state.players[player_id]
         
-        # Roll action (if turn hasn't started yet)
-        if state.last_roll is None or state.current_player == player_id:
+        # If player is bankrupt, no actions
+        if player.status == PlayerStatus.BANKRUPT:
+            return []
+        
+        # Check if it's this player's turn
+        if state.current_player != player_id:
+            return []
+        
+        # Handle jail situation
+        if player.jail_turns > 0:
+            # In jail - special actions available
+            if not state.has_rolled:
+                # Can try to roll doubles
+                actions.append({'type': 'roll'})
+                # Can pay $50 fine
+                if player.cash >= 50:
+                    actions.append({'type': 'pay_fine', 'cost': 50})
+                # Can use Get Out of Jail Free card
+                if player.get_out_of_jail_cards > 0:
+                    actions.append({'type': 'use_jail_card'})
+            else:
+                # Already tried rolling, must end turn
+                actions.append({'type': 'end_turn'})
+            return actions
+        
+        # Normal turn flow
+        if not state.has_rolled:
+            # Must roll first
             actions.append({'type': 'roll'})
+            return actions
         
-        # Check current position for property transactions
-        pos = player.position
-        tile = self.board.get_tile(pos)
+        # After rolling - check if awaiting buy decision
+        if state.awaiting_buy_decision:
+            pos = player.position
+            tile = self.board.get_tile(pos)
+            if tile.property_idx is not None:
+                prop = state.properties[tile.property_idx]
+                spec = self.property_specs[tile.property_idx]
+                if prop.owner is None and player.cash >= spec.price:
+                    actions.append({'type': 'buy', 'property_idx': tile.property_idx, 'cost': spec.price})
+            actions.append({'type': 'pass'})  # Decline to buy
+            return actions
         
-        if tile.property_idx is not None:
-            prop = state.properties[tile.property_idx]
-            spec = self.property_specs[tile.property_idx]
-            
-            # Buy action
-            if prop.owner is None and player.cash >= spec.price:
-                actions.append({'type': 'buy', 'property_idx': tile.property_idx, 'cost': spec.price})
-        
-        # Pass action (always available)
-        actions.append({'type': 'pass'})
+        # Post-roll phase - can do building/mortgage/etc and must eventually end turn
         
         # Build house actions (on monopolies)
         for prop_idx in player.properties_owned:
@@ -103,83 +135,207 @@ class RulesEngine:
                         'cost': unmortgage_cost
                     })
         
-        # Jail actions
-        if player.jail_turns > 0:
-            if player.cash >= 50:
-                actions.append({'type': 'pay_fine', 'cost': 50})
-            if player.get_out_of_jail_cards > 0:
-                actions.append({'type': 'use_jail_card'})
-        
-        # End turn action
+        # End turn action (always available after rolling)
         actions.append({'type': 'end_turn'})
         
         return actions
 
-    def apply_action(self, state: GameState, action: dict, rng: random.Random) -> Tuple[GameState, float, bool, str]:
+    def apply_action(self, state: GameState, action: dict, rng: random.Random, engine=None) -> Tuple[GameState, float, bool, str]:
+        """
+        Apply an action to the game state.
+        
+        Args:
+            state: Current game state
+            action: Action dict with 'type' and optional parameters
+            rng: Random number generator
+            engine: Optional GameEngine reference for card effects
+            
+        Returns:
+            Tuple of (new_state, reward, done, log_message)
+        """
         action_type = action.get('type')
         player_id = state.current_player
         reward = 0.0
         done = False
         log = f"Player {player_id} performed {action_type}"
+        player = state.players[player_id]
         
         if action_type == 'roll':
             roll = self.roll_dice(rng)
             state.last_roll = roll
-            state = self.handle_doubles_and_jail(state, player_id, roll)
-            if state.players[player_id].jail_turns == 0:
-                steps = sum(roll)
-                state = self.move_player(state, player_id, steps)
-                state = self.handle_landing(state, player_id, rng)
+            state.has_rolled = True
+            
+            # Handle jail roll
+            if player.jail_turns > 0:
+                d1, d2 = roll
+                if d1 == d2:
+                    # Rolled doubles - get out of jail
+                    player.jail_turns = 0
+                    steps = sum(roll)
+                    state = self.move_player(state, player_id, steps)
+                    state = self.handle_landing(state, player_id, rng, engine)
+                else:
+                    # Failed to roll doubles
+                    player.jail_turns += 1
+                    if player.jail_turns >= 4:
+                        # Must pay fine after 3 failed attempts
+                        player.cash -= 50
+                        player.jail_turns = 0
+                log = f"Player {player_id} rolled {roll} (in jail)"
+            else:
+                # Normal roll
+                state = self.handle_doubles_and_jail(state, player_id, roll)
+                if player.jail_turns == 0:  # Didn't get sent to jail for speeding
+                    steps = sum(roll)
+                    state = self.move_player(state, player_id, steps)
+                    state = self.handle_landing(state, player_id, rng, engine)
+                log = f"Player {player_id} rolled {roll}, moved to {player.position}"
+                
         elif action_type == 'buy':
             prop_idx = action.get('property_idx')
             if self.buy_property(state, player_id, prop_idx):
                 reward = 10  # Small reward for buying
-        elif action_type == 'pay_rent':
-            # Assume triggered on landing
-            pass
+                state.awaiting_buy_decision = False
+            log = f"Player {player_id} bought property {prop_idx}"
+            
+        elif action_type == 'pass':
+            # Pass on buying
+            state.awaiting_buy_decision = False
+            log = f"Player {player_id} passed on buying"
+            
         elif action_type == 'end_turn':
-            state.current_player = (state.current_player + 1) % len(state.players)
+            # Reset turn state and advance to next player
+            state.has_rolled = False
+            state.awaiting_buy_decision = False
+            state.last_roll = None
+            state.doubles_count = 0
+            
+            # Find next active player
+            next_player = (state.current_player + 1) % len(state.players)
+            safety = 0
+            while state.players[next_player].status == PlayerStatus.BANKRUPT and safety < len(state.players):
+                next_player = (next_player + 1) % len(state.players)
+                safety += 1
+            
+            state.current_player = next_player
             state.turn_number += 1
+            log = f"Player {player_id} ended turn, now player {next_player}'s turn"
+            
         elif action_type == 'use_jail_card':
-            if state.players[player_id].get_out_of_jail_cards > 0:
-                state.players[player_id].get_out_of_jail_cards -= 1
-                state.players[player_id].jail_turns = 0
-        # Add more actions as needed
+            if player.get_out_of_jail_cards > 0:
+                player.get_out_of_jail_cards -= 1
+                player.jail_turns = 0
+                log = f"Player {player_id} used Get Out of Jail Free card"
+                
+        elif action_type == 'pay_fine':
+            if player.cash >= 50 and player.jail_turns > 0:
+                player.cash -= 50
+                player.jail_turns = 0
+                log = f"Player {player_id} paid $50 to get out of jail"
+                
+        elif action_type == 'build':
+            prop_idx = action.get('property_idx')
+            if prop_idx is not None and prop_idx in player.properties_owned:
+                spec = self.property_specs[prop_idx]
+                prop = state.properties[prop_idx]
+                if (player.cash >= spec.house_cost and 
+                    prop.houses_count < 5 and 
+                    not prop.mortgaged and
+                    self._has_monopoly(state, prop_idx, player_id)):
+                    player.cash -= spec.house_cost
+                    prop.houses_count += 1
+                    if prop.houses_count == 5:
+                        # Converting to hotel
+                        state.bank_houses_left += 4
+                        state.bank_hotels_left -= 1
+                    else:
+                        state.bank_houses_left -= 1
+                    reward = 5  # Small reward for building
+                    log = f"Player {player_id} built house on property {prop_idx}"
+                    
+        elif action_type == 'mortgage':
+            prop_idx = action.get('property_idx')
+            if prop_idx is not None and prop_idx in player.properties_owned:
+                spec = self.property_specs[prop_idx]
+                prop = state.properties[prop_idx]
+                if not prop.mortgaged and prop.houses_count == 0:
+                    prop.mortgaged = True
+                    player.cash += spec.mortgage_value
+                    player.mortgaged_properties.add(prop_idx)
+                    log = f"Player {player_id} mortgaged property {prop_idx} for ${spec.mortgage_value}"
+                    
+        elif action_type == 'unmortgage':
+            prop_idx = action.get('property_idx')
+            if prop_idx is not None and prop_idx in player.properties_owned:
+                spec = self.property_specs[prop_idx]
+                prop = state.properties[prop_idx]
+                unmortgage_cost = int(spec.mortgage_value * 1.1)
+                if prop.mortgaged and player.cash >= unmortgage_cost:
+                    prop.mortgaged = False
+                    player.cash -= unmortgage_cost
+                    player.mortgaged_properties.discard(prop_idx)
+                    log = f"Player {player_id} unmortgaged property {prop_idx} for ${unmortgage_cost}"
         
         # Check for game end
         active_players = [p for p in state.players if p.status == PlayerStatus.ACTIVE]
         if len(active_players) <= 1:
             done = True
-            reward = 100 if active_players[0].id == player_id else -100
+            if active_players and active_players[0].id == player_id:
+                reward += 100
+            else:
+                reward -= 100
         
         return state, reward, done, log
 
     def handle_landing(self, state: GameState, player_id: int, rng: random.Random, engine=None) -> GameState:
+        """Handle what happens when a player lands on a tile."""
         pos = state.players[player_id].position
         tile = self.board.get_tile(pos)
+        player = state.players[player_id]
+        
         if tile.kind == TileKind.PROPERTY or tile.kind == TileKind.RAILROAD or tile.kind == TileKind.UTILITY:
             prop_idx = tile.property_idx
             if prop_idx is not None:
-                owner = state.properties[prop_idx].owner
-                if owner is not None and owner != player_id:
-                    rent = self.calculate_rent(state, prop_idx, sum(state.last_roll) if tile.kind == TileKind.UTILITY else None)
-                    state.players[player_id].cash -= rent
+                prop = state.properties[prop_idx]
+                owner = prop.owner
+                
+                if owner is None:
+                    # Unowned property - player can choose to buy
+                    state.awaiting_buy_decision = True
+                elif owner != player_id and not prop.mortgaged:
+                    # Pay rent to owner
+                    dice_roll = sum(state.last_roll) if state.last_roll else 7
+                    rent = self.calculate_rent(state, prop_idx, dice_roll if tile.kind == TileKind.UTILITY else None)
+                    player.cash -= rent
                     state.players[owner].cash += rent
-                    if state.players[player_id].cash < 0:
+                    if player.cash < 0:
                         state = self.handle_bankruptcy(state, player_id)
+                        
         elif tile.kind == TileKind.TAX:
-            tax = 200 if pos == 4 else 100  # Income or Luxury
-            state.players[player_id].cash -= tax
+            tax = 200 if pos == 4 else 100  # Income Tax ($200) or Luxury Tax ($100)
+            player.cash -= tax
+            if player.cash < 0:
+                state = self.handle_bankruptcy(state, player_id)
+                
         elif tile.kind == TileKind.CHANCE:
             card = self.draw_card(state, "chance", rng)
-            # Card.effect expects (state, engine, rng, player_id)
             state, _ = card.effect(state, engine, rng, player_id)
+            if player.cash < 0:
+                state = self.handle_bankruptcy(state, player_id)
+                
         elif tile.kind == TileKind.COMMUNITY:
             card = self.draw_card(state, "community", rng)
             state, _ = card.effect(state, engine, rng, player_id)
+            if player.cash < 0:
+                state = self.handle_bankruptcy(state, player_id)
+                
         elif tile.kind == TileKind.GO_TO_JAIL:
-            state.players[player_id].position = 10
-            state.players[player_id].jail_turns = 1
+            player.position = 10
+            player.jail_turns = 1
+            state.doubles_count = 0  # Reset doubles when going to jail
+            
+        # GO, FREE_PARKING, JAIL (just visiting) have no special effects
+        
         return state
 
     def move_player(self, state: GameState, player_id: int, steps: int) -> GameState:

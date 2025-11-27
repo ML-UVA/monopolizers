@@ -163,14 +163,18 @@ class MonopolyEnv(gym.Env):
             last_roll=None,
             doubles_count=0,
             turn_number=0,
-            seed=self._seed
+            seed=self._seed,
+            has_rolled=False,
+            awaiting_buy_decision=False,
+            pending_rent=0,
+            rent_creditor=None
         )
         
         self.engine = GameEngine(self.rules_engine, seed=self._seed)
         self._episode_step = 0
         
         # If agent is not first player, simulate opponent turns until agent's turn
-        while self.state.current_player != self.agent_player_id:
+        while self.state.current_player != self.agent_player_id and not self._is_game_over():
             self._simulate_opponent_turn()
         
         obs = self._get_observation()
@@ -190,35 +194,47 @@ class MonopolyEnv(gym.Env):
         # Convert discrete action to game action
         game_action = self._decode_action(action)
         
-        # Apply action through rules engine
-        reward = 0.0
-        try:
-            old_cash = self.state.players[self.agent_player_id].cash
-            old_properties = len(self.state.players[self.agent_player_id].properties_owned)
-            
-            # Execute the action
-            if game_action['type'] == 'roll':
-                self.state = self.engine.run_turn(self.state)
+        # Validate action is legal
+        legal_mask = self._get_legal_mask()
+        if legal_mask[action] == 0:
+            # Invalid action - give small penalty and force pass/end_turn
+            reward = -1.0
+            if self.state.has_rolled:
+                game_action = {'type': 'end_turn'}
             else:
-                self.state, action_reward, done, log = self.rules_engine.apply_action(
-                    self.state, game_action, self.engine.rng
-                )
-                reward += action_reward
-            
-            # Calculate shaped reward
-            new_cash = self.state.players[self.agent_player_id].cash
-            new_properties = len(self.state.players[self.agent_player_id].properties_owned)
-            reward += (new_cash - old_cash) / 1000.0  # Normalize cash changes
-            reward += (new_properties - old_properties) * 0.5  # Reward property acquisition
+                game_action = {'type': 'roll'}
+        else:
+            reward = 0.0
+        
+        # Track state for reward shaping
+        old_cash = self.state.players[self.agent_player_id].cash
+        old_properties = len(self.state.players[self.agent_player_id].properties_owned)
+        
+        # Apply action through rules engine
+        try:
+            self.state, action_reward, done, log = self.rules_engine.apply_action(
+                self.state, game_action, self.engine.rng, engine=self.engine
+            )
+            reward += action_reward
             
         except Exception as e:
-            # If action fails, give negative reward and end episode
-            reward = -10.0
-            print(f"Action failed: {e}")
+            # If action fails, give negative reward
+            reward = -5.0
+            # Force end turn to prevent stuck state
+            if self.state.has_rolled:
+                self.state, _, _, _ = self.rules_engine.apply_action(
+                    self.state, {'type': 'end_turn'}, self.engine.rng, engine=self.engine
+                )
+        
+        # Calculate shaped reward
+        new_cash = self.state.players[self.agent_player_id].cash
+        new_properties = len(self.state.players[self.agent_player_id].properties_owned)
+        reward += (new_cash - old_cash) / 1000.0  # Normalize cash changes
+        reward += (new_properties - old_properties) * 0.5  # Reward property acquisition
         
         self._episode_step += 1
         
-        # Simulate opponent turns
+        # Simulate opponent turns only if it's no longer the agent's turn
         while (self.state.current_player != self.agent_player_id and 
                not self._is_game_over()):
             self._simulate_opponent_turn()
@@ -294,35 +310,55 @@ class MonopolyEnv(gym.Env):
         return obs
 
     def _get_legal_mask(self) -> np.ndarray:
-        """Compute binary mask of legal actions."""
+        """Compute binary mask of legal actions based on current game state."""
         mask = np.zeros(self.n_actions, dtype=np.int32)
         player = self.state.players[self.agent_player_id]
         
-        # Always can roll if it's start of turn
-        if self.state.last_roll is None or self.state.current_player == self.agent_player_id:
+        # If player is bankrupt, no actions
+        if player.status == PlayerStatus.BANKRUPT:
+            return mask
+        
+        # Handle jail situation
+        if player.jail_turns > 0:
+            if not self.state.has_rolled:
+                mask[0] = 1  # roll (try for doubles)
+                if player.cash >= 50:
+                    mask[87] = 1  # pay_fine
+                if player.get_out_of_jail_cards > 0:
+                    mask[88] = 1  # use_jail_card
+            else:
+                mask[89] = 1  # end_turn
+            return mask
+        
+        # Normal turn flow
+        if not self.state.has_rolled:
+            # Must roll first
             mask[0] = 1  # roll
+            return mask
         
-        # Check if on buyable property
-        pos = player.position
-        tile = self.board.get_tile(pos)
-        if tile.property_idx is not None:
-            prop = self.state.properties[tile.property_idx]
-            spec = self.property_specs[tile.property_idx]
-            
-            if prop.owner is None and player.cash >= spec.price:
-                mask[1] = 1  # buy
-            mask[2] = 1  # pass (always legal)
-        else:
-            mask[2] = 1  # pass
+        # After rolling - check if awaiting buy decision
+        if self.state.awaiting_buy_decision:
+            pos = player.position
+            tile = self.board.get_tile(pos)
+            if tile.property_idx is not None:
+                prop = self.state.properties[tile.property_idx]
+                spec = self.property_specs[tile.property_idx]
+                if prop.owner is None and player.cash >= spec.price:
+                    mask[1] = 1  # buy
+            mask[2] = 1  # pass (decline to buy)
+            return mask
         
-        # Building houses (simplified: check monopoly and cash)
+        # Post-roll phase - can build/mortgage/unmortgage and must end turn
+        
+        # Building houses (on monopolies)
         for prop_idx in player.properties_owned:
             if self.rules_engine._has_monopoly(self.state, prop_idx, self.agent_player_id):
                 spec = self.property_specs[prop_idx]
                 prop = self.state.properties[prop_idx]
                 if (prop.houses_count < 5 and 
                     player.cash >= spec.house_cost and 
-                    not prop.mortgaged):
+                    not prop.mortgaged and
+                    self.state.bank_houses_left > 0):
                     mask[3 + prop_idx] = 1  # build
         
         # Mortgage actions
@@ -336,20 +372,13 @@ class MonopolyEnv(gym.Env):
                 if player.cash >= unmortgage_cost:
                     mask[59 + prop_idx] = 1  # unmortgage
         
-        # Jail actions
-        if player.jail_turns > 0:
-            if player.cash >= 50:
-                mask[87] = 1  # pay fine
-            if player.get_out_of_jail_cards > 0:
-                mask[88] = 1  # use card
-        
-        # End turn (always legal as fallback)
+        # End turn (always legal after rolling and resolving buy decision)
         mask[89] = 1
         
         return mask
 
     def _simulate_opponent_turn(self):
-        """Simulate one turn for an opponent using their policy."""
+        """Simulate one complete turn for an opponent using their policy."""
         if self._is_game_over():
             return
         
@@ -357,54 +386,62 @@ class MonopolyEnv(gym.Env):
         if current_player == self.agent_player_id:
             return
         
+        # Check if current player is bankrupt
+        if self.state.players[current_player].status == PlayerStatus.BANKRUPT:
+            # Skip to next player
+            self.state.has_rolled = False
+            self.state.awaiting_buy_decision = False
+            self.state.current_player = (self.state.current_player + 1) % self.num_players
+            return
+        
         # Find the agent for the current player
-        # self.opponent_policies is a list of agents. We need to find the one with player_id == current_player
         agent = next((a for a in self.opponent_policies if a.player_id == current_player), None)
         
         if agent:
             # Full turn simulation loop for opponent
             turn_ended = False
             steps = 0
-            max_steps = 20  # Prevent infinite loops
+            max_steps = 30  # Prevent infinite loops
             
-            while not turn_ended and steps < max_steps:
+            while not turn_ended and steps < max_steps and not self._is_game_over():
                 legal_actions = self.rules_engine.legal_actions(self.state, current_player)
                 if not legal_actions:
+                    # No legal actions - force end turn
+                    self.state, _, _, _ = self.rules_engine.apply_action(
+                        self.state, {'type': 'end_turn'}, self.engine.rng, engine=self.engine
+                    )
                     turn_ended = True
                     break
                 
                 # Agent selects action
                 action = agent.select_action(self.state, legal_actions)
                 
-                # Apply action
-                if action['type'] == 'roll':
-                    # Use engine's run_turn logic for rolling/moving which handles doubles/jail
-                    # But wait, run_turn does the whole move. 
-                    # We should use rules_engine.apply_action for consistency if possible,
-                    # OR use engine.run_turn and then continue the loop.
-                    # The issue is engine.run_turn does NOT return legal actions for buying after landing.
-                    # It just moves.
-                    
-                    # Let's use rules_engine.apply_action for 'roll' which calls move_player etc.
-                    self.state, _, _, _ = self.rules_engine.apply_action(self.state, action, self.engine.rng)
-                else:
-                    self.state, _, _, _ = self.rules_engine.apply_action(self.state, action, self.engine.rng)
+                # Apply action through rules engine
+                self.state, _, done, _ = self.rules_engine.apply_action(
+                    self.state, action, self.engine.rng, engine=self.engine
+                )
                 
                 if action['type'] == 'end_turn':
                     turn_ended = True
                 
-                # Check if game over during turn
-                if self._is_game_over():
+                if done:
                     turn_ended = True
                 
                 steps += 1
                 
             # Force end turn if loop stuck
-            if not turn_ended:
+            if not turn_ended and not self._is_game_over():
+                self.state.has_rolled = False
+                self.state.awaiting_buy_decision = False
+                self.state.last_roll = None
+                self.state.doubles_count = 0
                 self.state.current_player = (self.state.current_player + 1) % self.num_players
                 self.state.turn_number += 1
         else:
-            # Fallback if no agent found (shouldn't happen)
+            # Fallback if no agent found - skip turn
+            self.state.has_rolled = False
+            self.state.awaiting_buy_decision = False
+            self.state.last_roll = None
             self.state.current_player = (self.state.current_player + 1) % self.num_players
             self.state.turn_number += 1
 
@@ -416,13 +453,17 @@ class MonopolyEnv(gym.Env):
 
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info dict."""
+        agent_player = self.state.players[self.agent_player_id]
         return {
             'turn_number': self.state.turn_number,
             'episode_step': self._episode_step,
             'current_player': self.state.current_player,
-            'agent_cash': self.state.players[self.agent_player_id].cash,
-            'agent_properties': len(self.state.players[self.agent_player_id].properties_owned),
+            'agent_cash': agent_player.cash,
+            'agent_properties': len(agent_player.properties_owned),
+            'agent_status': agent_player.status.value,
             'active_players': sum(1 for p in self.state.players if p.status == PlayerStatus.ACTIVE),
+            'has_rolled': self.state.has_rolled,
+            'awaiting_buy_decision': self.state.awaiting_buy_decision,
         }
 
     def render(self):
