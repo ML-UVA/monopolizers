@@ -47,26 +47,41 @@ def load_chance_cards() -> List[Card]:
         # Advance to Illinois Avenue (pos 24), collect $200 if pass GO
         old_pos = state.players[player_id].position
         state.players[player_id].position = 24
-        if state.players[player_id].position < old_pos:
+        passed_go = 24 < old_pos  # Passed GO if new position is lower
+        if passed_go:
             state.players[player_id].cash += 200
-        return state, {"passed_go": state.players[player_id].position < old_pos}
+        # Trigger landing effects (pay rent if owned)
+        if engine is not None:
+            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+        return state, {"passed_go": passed_go}
 
     def advance_to_st_charles(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         old_pos = state.players[player_id].position
         state.players[player_id].position = 11
-        if state.players[player_id].position < old_pos:
+        passed_go = 11 < old_pos  # Passed GO if new position is lower
+        if passed_go:
             state.players[player_id].cash += 200
-        return state, {"passed_go": state.players[player_id].position < old_pos}
+        # Trigger landing effects (pay rent if owned)
+        if engine is not None:
+            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+        return state, {"passed_go": passed_go}
 
     def advance_to_reading(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         old_pos = state.players[player_id].position
         state.players[player_id].position = 5
-        if state.players[player_id].position < old_pos:
+        passed_go = 5 < old_pos  # Passed GO if new position is lower
+        if passed_go:
             state.players[player_id].cash += 200
-        return state, {"passed_go": state.players[player_id].position < old_pos}
+        # Trigger landing effects (pay rent if owned)
+        if engine is not None:
+            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+        return state, {"passed_go": passed_go}
 
     def advance_to_boardwalk(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         state.players[player_id].position = 39
+        # Trigger landing effects (pay rent if owned)
+        if engine is not None:
+            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
         return state, {}
 
     def bank_dividend(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
@@ -78,7 +93,14 @@ def load_chance_cards() -> List[Card]:
         return state, {"cards": 1}
 
     def go_back_3(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
-        state.players[player_id].position -= 3
+        old_pos = state.players[player_id].position
+        new_pos = old_pos - 3
+        if new_pos < 0:
+            new_pos += 40  # Wrap around (shouldn't happen in standard board)
+        state.players[player_id].position = new_pos
+        # Trigger landing effects (may draw another card, which is allowed)
+        if engine is not None:
+            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
         return state, {}
 
     def go_to_jail(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
@@ -96,18 +118,29 @@ def load_chance_cards() -> List[Card]:
     def advance_nearest_railroad(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         pos = state.players[player_id].position
         railroads = [5, 15, 25, 35]
-        nearest = min(railroads, key=lambda x: (x - pos) % 40)
+        # Find the nearest railroad AHEAD of current position (going around the board)
+        distances = [((r - pos) % 40, r) for r in railroads]
+        distances.sort()  # Sort by distance
+        nearest = distances[0][1]  # Get position of nearest
         old_pos = pos
         state.players[player_id].position = nearest
-        if nearest < old_pos:
+        passed_go = nearest < old_pos  # Passed GO if new position is lower
+        if passed_go:
             state.players[player_id].cash += 200
-        # Pay double rent if owned
-        prop_idx = engine.board.get_tile(nearest).property_idx
-        if prop_idx is not None and state.properties[prop_idx].owner is not None:
-            rent = engine.calculate_rent(state, prop_idx) * 2
-            state.players[player_id].cash -= rent
-            state.players[state.properties[prop_idx].owner].cash += rent
-        return state, {"moved_to": nearest, "passed_go": nearest < old_pos}
+        # Pay double rent if owned (special rule for this card)
+        if engine is not None:
+            prop_idx = engine.board.get_tile(nearest).property_idx
+            if prop_idx is not None:
+                prop = state.properties[prop_idx]
+                if prop.owner is not None and prop.owner != player_id and not prop.mortgaged:
+                    # Pay double rent
+                    rent = engine.rules_engine.calculate_rent(state, prop_idx) * 2
+                    state.players[player_id].cash -= rent
+                    state.players[prop.owner].cash += rent
+                elif prop.owner is None:
+                    # Unowned - can buy (set flag for buy decision)
+                    state.awaiting_buy_decision = True
+        return state, {"moved_to": nearest, "passed_go": passed_go}
 
     def pay_15(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         state.players[player_id].cash -= 15
@@ -116,16 +149,22 @@ def load_chance_cards() -> List[Card]:
     def ride_reading(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         old_pos = state.players[player_id].position
         state.players[player_id].position = 5
-        if state.players[player_id].position < old_pos:
+        passed_go = 5 < old_pos  # Passed GO if new position is lower
+        if passed_go:
             state.players[player_id].cash += 200
-        return state, {"passed_go": state.players[player_id].position < old_pos}
+        # Trigger landing effects (pay rent if owned)
+        if engine is not None:
+            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+        return state, {"passed_go": passed_go}
 
     def chairman_board(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        # "Pay each player $50" - the current player PAYS $50 to each other player
+        from .state import PlayerStatus
         for i, p in enumerate(state.players):
-            if i != player_id:
-                p.cash -= 50
-                state.players[player_id].cash += 50
-        return state, {"collected_per": 50}
+            if i != player_id and p.status == PlayerStatus.ACTIVE:
+                state.players[player_id].cash -= 50
+                p.cash += 50
+        return state, {"paid_per": 50}
 
     def building_loan(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         state.players[player_id].cash += 150
@@ -190,8 +229,10 @@ def load_community_cards() -> List[Card]:
         return state, {"collected": 20}
 
     def birthday(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        # Collect $10 from each other active player
+        from .state import PlayerStatus
         for i, p in enumerate(state.players):
-            if i != player_id:
+            if i != player_id and p.status == PlayerStatus.ACTIVE:
                 p.cash -= 10
                 state.players[player_id].cash += 10
         return state, {"collected_per": 10}

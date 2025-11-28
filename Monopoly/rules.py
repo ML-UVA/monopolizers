@@ -69,14 +69,14 @@ class RulesEngine:
             if not state.has_rolled:
                 # Can try to roll doubles
                 actions.append({'type': 'roll'})
-                # Can pay $50 fine
+                # Can pay $50 fine to get out and then roll
                 if player.cash >= 50:
                     actions.append({'type': 'pay_fine', 'cost': 50})
-                # Can use Get Out of Jail Free card
+                # Can use Get Out of Jail Free card and then roll
                 if player.get_out_of_jail_cards > 0:
                     actions.append({'type': 'use_jail_card'})
             else:
-                # Already tried rolling, must end turn
+                # Already rolled (and failed to get doubles), must end turn
                 actions.append({'type': 'end_turn'})
             return actions
         
@@ -169,19 +169,25 @@ class RulesEngine:
             if player.jail_turns > 0:
                 d1, d2 = roll
                 if d1 == d2:
-                    # Rolled doubles - get out of jail
+                    # Rolled doubles - get out of jail and move
                     player.jail_turns = 0
                     steps = sum(roll)
                     state = self.move_player(state, player_id, steps)
                     state = self.handle_landing(state, player_id, rng, engine)
+                    log = f"Player {player_id} rolled doubles {roll}, got out of jail and moved"
                 else:
                     # Failed to roll doubles
                     player.jail_turns += 1
                     if player.jail_turns >= 4:
-                        # Must pay fine after 3 failed attempts
+                        # Must pay fine after 3 failed attempts, then move with this roll
                         player.cash -= 50
                         player.jail_turns = 0
-                log = f"Player {player_id} rolled {roll} (in jail)"
+                        steps = sum(roll)
+                        state = self.move_player(state, player_id, steps)
+                        state = self.handle_landing(state, player_id, rng, engine)
+                        log = f"Player {player_id} paid $50 (3 failed attempts), rolled {roll} and moved"
+                    else:
+                        log = f"Player {player_id} rolled {roll} (in jail, attempt {player.jail_turns})"
             else:
                 # Normal roll
                 state = self.handle_doubles_and_jail(state, player_id, roll)
@@ -225,12 +231,14 @@ class RulesEngine:
             if player.get_out_of_jail_cards > 0:
                 player.get_out_of_jail_cards -= 1
                 player.jail_turns = 0
+                # Don't set has_rolled - player still needs to roll this turn
                 log = f"Player {player_id} used Get Out of Jail Free card"
                 
         elif action_type == 'pay_fine':
             if player.cash >= 50 and player.jail_turns > 0:
                 player.cash -= 50
                 player.jail_turns = 0
+                # Don't set has_rolled - player still needs to roll this turn
                 log = f"Player {player_id} paid $50 to get out of jail"
                 
         elif action_type == 'build':

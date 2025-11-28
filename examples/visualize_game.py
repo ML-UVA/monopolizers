@@ -60,14 +60,27 @@ def visualize_random_game(num_episodes=3, num_players=4, steps_per_second=2):
         step_count = 0
         
         while not (terminated or truncated):
-            # Select random action from legal actions
+            # Select action from legal actions using simple heuristics
             legal_mask = obs['legal_mask']
             legal_actions = [i for i, legal in enumerate(legal_mask) if legal]
             
             if legal_actions:
-                action = legal_actions[0]  # Take first legal action (usually roll)
+                # Prioritize: roll (0) > buy (1) > pay_fine (87) > use_jail_card (88) > pass (2) > end_turn (89)
+                # Avoid mortgage/unmortgage/build to prevent infinite loops in visualization
+                priority_order = [0, 1, 87, 88, 2, 89]  # roll, buy, pay_fine, use_jail_card, pass, end_turn
+                action = None
+                for prio in priority_order:
+                    if prio in legal_actions:
+                        action = prio
+                        break
+                if action is None:
+                    # Fallback to end_turn if available, else first action
+                    if 89 in legal_actions:
+                        action = 89
+                    else:
+                        action = legal_actions[0]
             else:
-                action = 0
+                action = 0  # Should never happen
             
             # Take step
             obs, reward, terminated, truncated, info = env.step(action)
@@ -145,11 +158,25 @@ def visualize_vs_greedy(num_episodes=2, num_players=3, steps_per_second=1):
         step_count = 0
         
         while not (terminated or truncated):
+            # Select action from legal actions using simple heuristics
             legal_mask = obs['legal_mask']
             legal_actions = [i for i, legal in enumerate(legal_mask) if legal]
             
             if legal_actions:
-                action = legal_actions[0]
+                # Prioritize: roll (0) > buy (1) > pay_fine (87) > use_jail_card (88) > pass (2) > end_turn (89)
+                # Avoid mortgage/unmortgage/build to prevent infinite loops
+                priority_order = [0, 1, 87, 88, 2, 89]
+                action = None
+                for prio in priority_order:
+                    if prio in legal_actions:
+                        action = prio
+                        break
+                if action is None:
+                    # Fallback to end_turn if available, else first action
+                    if 89 in legal_actions:
+                        action = 89
+                    else:
+                        action = legal_actions[0]
             else:
                 action = 0
             

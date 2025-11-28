@@ -423,10 +423,11 @@ class MonopolyEnv(gym.Env):
             if not self.state.has_rolled:
                 mask[0] = 1  # roll (try for doubles)
                 if player.cash >= 50:
-                    mask[87] = 1  # pay_fine
+                    mask[87] = 1  # pay_fine (get out and can roll next)
                 if player.get_out_of_jail_cards > 0:
-                    mask[88] = 1  # use_jail_card
+                    mask[88] = 1  # use_jail_card (get out and can roll next)
             else:
+                # Already rolled (and didn't get doubles), must end turn
                 mask[89] = 1  # end_turn
             return mask
         
