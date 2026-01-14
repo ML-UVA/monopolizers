@@ -37,6 +37,15 @@ class CardDeck:
         return card.effect(state, engine, rng, state.current_player)
 
 def load_chance_cards() -> List[Card]:
+    def _rules_engine(engine):
+        # Some unit tests call card.effect with a RulesEngine directly, while
+        # the main game passes a GameEngine that has a .rules_engine attribute.
+        return engine.rules_engine if hasattr(engine, 'rules_engine') else engine
+
+    def _board(engine):
+        eng = _rules_engine(engine)
+        return getattr(engine, 'board', None) or getattr(eng, 'board', None)
+
     def advance_to_go(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         # Move to GO, collect $200
         state.players[player_id].position = 0
@@ -52,7 +61,7 @@ def load_chance_cards() -> List[Card]:
             state.players[player_id].cash += 200
         # Trigger landing effects (pay rent if owned)
         if engine is not None:
-            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+            state = _rules_engine(engine).handle_landing(state, player_id, rng, engine)
         return state, {"passed_go": passed_go}
 
     def advance_to_st_charles(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
@@ -63,7 +72,7 @@ def load_chance_cards() -> List[Card]:
             state.players[player_id].cash += 200
         # Trigger landing effects (pay rent if owned)
         if engine is not None:
-            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+            state = _rules_engine(engine).handle_landing(state, player_id, rng, engine)
         return state, {"passed_go": passed_go}
 
     def advance_to_reading(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
@@ -74,14 +83,14 @@ def load_chance_cards() -> List[Card]:
             state.players[player_id].cash += 200
         # Trigger landing effects (pay rent if owned)
         if engine is not None:
-            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+            state = _rules_engine(engine).handle_landing(state, player_id, rng, engine)
         return state, {"passed_go": passed_go}
 
     def advance_to_boardwalk(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         state.players[player_id].position = 39
         # Trigger landing effects (pay rent if owned)
         if engine is not None:
-            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+            state = _rules_engine(engine).handle_landing(state, player_id, rng, engine)
         return state, {}
 
     def bank_dividend(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
@@ -100,7 +109,7 @@ def load_chance_cards() -> List[Card]:
         state.players[player_id].position = new_pos
         # Trigger landing effects (may draw another card, which is allowed)
         if engine is not None:
-            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+            state = _rules_engine(engine).handle_landing(state, player_id, rng, engine)
         return state, {}
 
     def go_to_jail(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
@@ -129,12 +138,14 @@ def load_chance_cards() -> List[Card]:
             state.players[player_id].cash += 200
         # Pay double rent if owned (special rule for this card)
         if engine is not None:
-            prop_idx = engine.board.get_tile(nearest).property_idx
+            board = _board(engine)
+            rules_engine = _rules_engine(engine)
+            prop_idx = board.get_tile(nearest).property_idx if board is not None else None
             if prop_idx is not None:
                 prop = state.properties[prop_idx]
                 if prop.owner is not None and prop.owner != player_id and not prop.mortgaged:
                     # Pay double rent
-                    rent = engine.rules_engine.calculate_rent(state, prop_idx) * 2
+                    rent = rules_engine.calculate_rent(state, prop_idx) * 2
                     state.players[player_id].cash -= rent
                     state.players[prop.owner].cash += rent
                 elif prop.owner is None:
@@ -154,7 +165,7 @@ def load_chance_cards() -> List[Card]:
             state.players[player_id].cash += 200
         # Trigger landing effects (pay rent if owned)
         if engine is not None:
-            state = engine.rules_engine.handle_landing(state, player_id, rng, engine)
+            state = _rules_engine(engine).handle_landing(state, player_id, rng, engine)
         return state, {"passed_go": passed_go}
 
     def chairman_board(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:

@@ -176,14 +176,14 @@ def main():
         print("Monopoly Training: Random Agent vs Greedy Opponents")
         print("="*60)
         
-        # Evaluate random baseline
-        win_rate_2p, _ = evaluate_random_vs_greedy(num_episodes=10, num_players=2, seed=42)
+        # Keep this example fast (it's used as a smoke test in CI).
+        win_rate_2p, _ = evaluate_random_vs_greedy(num_episodes=2, num_players=2, seed=42)
         
         # Evaluate with more opponents
-        win_rate_4p, _ = evaluate_random_vs_greedy(num_episodes=10, num_players=4, seed=123)
+        win_rate_4p, _ = evaluate_random_vs_greedy(num_episodes=2, num_players=4, seed=123)
         
         # Simple Q-learning baseline
-        train_simple_q_table(num_episodes=50, num_players=2)
+        train_simple_q_table(num_episodes=5, num_players=2)
         
         print("\n" + "="*60)
         print("Training & Evaluation Complete!")

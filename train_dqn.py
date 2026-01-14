@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Stable-Baselines3 DQN Training Script for Monopoly
+Monopoly RL Training Script - DQN and DDQN-Hybrid Modes
 
-This script provides a complete training pipeline for training a DQN agent
-to play Monopoly using the Stable-Baselines3 library.
+This script provides training pipelines for both:
+- SB3 DQN (Stable-Baselines3 implementation)
+- DDQN-Hybrid (Custom PyTorch Double-DQN with action masking)
 
 Four-Player Mode:
-- Player 0: RL Agent (DQN - generates training data)
+- Player 0: RL Agent (DQN/DDQN - generates training data)
 - Player 1: Random Bot
 - Player 2: MCTS Bot
 - Player 3: Greedy Bot
@@ -15,31 +16,42 @@ Reward System (Net Worth Based):
 - No reward for winning/losing
 - Reward = agent_net_worth / sum(other_active_players_net_worth)
 - Net worth = cash + sum(property_values)
-- Property value = (base_price - mortgage_value) * bonus + houses * house_cost + hotels * hotel_cost
-- Bonus = 1.5 (no monopoly) or 2.0 (has monopoly)
-- Mortgaged properties have value 0
+
+Example Usage:
+    # Train with SB3 DQN
+    python train_dqn.py --agent dqn --total_timesteps 2000000 --output_dir runs/dqn_seed42
+
+    # Train with custom DDQN-Hybrid
+    python train_dqn.py --agent ddqn_hybrid --total_timesteps 2000000 --output_dir runs/ddqn_hybrid_seed42
+
+    # Evaluate a trained model
+    python train_dqn.py --evaluate --model runs/dqn_seed42/models/dqn/monopoly_dqn_final.zip
+
+    # Run random baseline
+    python train_dqn.py --baseline --episodes 100
 
 Requirements:
-    pip install stable-baselines3 tensorboard gymnasium numpy
-
-Usage:
-    python train_dqn.py --train --timesteps 100000
-    python train_dqn.py --evaluate --model models/monopoly_dqn_final.zip
+    pip install stable-baselines3 tensorboard gymnasium numpy torch
 """
 
 import sys
 import os
 import argparse
 import time
+import random
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
+from datetime import datetime
 import numpy as np
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
 # Gymnasium
 import gymnasium as gym
+
+# PyTorch (for seeding)
+import torch
 
 # Stable-Baselines3
 from stable_baselines3 import DQN
@@ -65,9 +77,34 @@ from Monopoly.board import Board
 from Monopoly.property import load_property_specs
 from Monopoly.cards import load_chance_cards, load_community_cards
 
+# Utilities
+from utils.save_utils import (
+    save_metrics_csv,
+    append_metrics_csv,
+    ensure_dir,
+    get_run_id,
+    CSV_COLUMNS,
+)
+
 
 # ============================================================================
-# Custom Callbacks
+# Seeding Utilities
+# ============================================================================
+
+def set_global_seeds(seed: int) -> None:
+    """Set random seeds for reproducibility across all libraries."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+# ============================================================================
+# Custom Callbacks for SB3 DQN
 # ============================================================================
 
 class TensorboardCallback(BaseCallback):
@@ -106,15 +143,44 @@ class TensorboardCallback(BaseCallback):
         return True
 
 
-class ActionMaskCallback(BaseCallback):
+class MetricsCSVCallback(BaseCallback):
     """
-    Callback that applies action masking during training.
-    This modifies the action selection to only choose from legal actions.
+    Callback that logs episode metrics to CSV file.
     """
-    def __init__(self, verbose: int = 0):
+    def __init__(
+        self, 
+        csv_path: str,
+        run_id: str,
+        seed: int,
+        verbose: int = 0
+    ):
         super().__init__(verbose)
+        self.csv_path = Path(csv_path)
+        self.run_id = run_id
+        self.seed = seed
+        self.episode_count = 0
         
     def _on_step(self) -> bool:
+        if 'infos' in self.locals:
+            for info in self.locals['infos']:
+                if 'episode' in info:
+                    self.episode_count += 1
+                    
+                    metric = {
+                        'timestamp': datetime.now().isoformat(),
+                        'episode': self.episode_count,
+                        'episode_length': info['episode']['l'],
+                        'final_net_worth': info.get('agent_net_worth', 0),
+                        'agent_rank': 0,
+                        'win_flag': 1 if (info.get('agent_status') == 'ACTIVE' and 
+                                         info.get('active_players', 1) == 1) else 0,
+                        'total_steps': self.num_timesteps,
+                        'mean_episode_reward': info['episode']['r'],
+                        'eval_tag': 'train',
+                    }
+                    
+                    append_metrics_csv(self.csv_path, metric, self.run_id, self.seed)
+        
         return True
 
 
@@ -297,22 +363,21 @@ def get_dqn_config(preset: str = 'default') -> Dict[str, Any]:
 
 
 # ============================================================================
-# Training Function
+# SB3 DQN Training Function
 # ============================================================================
 
 def train_dqn(
     total_timesteps: int = 100000,
     max_turns: int = 500,
     config_preset: str = 'default',
-    save_path: str = 'models',
-    log_path: str = 'logs',
+    output_dir: str = 'runs/dqn',
     seed: int = 42,
-    eval_freq: int = 5000,
+    eval_interval: int = 5000,
     n_eval_episodes: int = 10,
     verbose: int = 1
 ) -> DQN:
     """
-    Train a DQN agent to play Monopoly in 4-player mode.
+    Train a DQN agent using Stable-Baselines3.
     
     Players:
     - Player 0: RL Agent (DQN)
@@ -326,16 +391,32 @@ def train_dqn(
         total_timesteps: Total training timesteps
         max_turns: Maximum turns per episode
         config_preset: Hyperparameter preset
-        save_path: Path to save models
-        log_path: Path for tensorboard logs
+        output_dir: Output directory for models/logs/metrics
         seed: Random seed
-        eval_freq: Evaluation frequency
+        eval_interval: Evaluation frequency
         n_eval_episodes: Number of evaluation episodes
         verbose: Verbosity level
         
     Returns:
         Trained DQN model
     """
+    # Set seeds
+    set_global_seeds(seed)
+    
+    # Setup output directories
+    output_dir = Path(output_dir)
+    models_dir = output_dir / 'models' / 'dqn'
+    results_dir = output_dir / 'results'
+    tensorboard_dir = output_dir / 'tensorboard' / 'dqn'
+    
+    ensure_dir(models_dir)
+    ensure_dir(results_dir)
+    ensure_dir(tensorboard_dir)
+    
+    # Generate run ID
+    run_id = get_run_id('dqn', seed)
+    csv_path = results_dir / 'dqn_metrics.csv'
+    
     print("=" * 60)
     print("Monopoly DQN Training (4-Player Mode)")
     print("=" * 60)
@@ -344,11 +425,8 @@ def train_dqn(
     print(f"Reward: Net worth relative to opponents")
     print(f"Config preset: {config_preset}")
     print(f"Seed: {seed}")
+    print(f"Output directory: {output_dir}")
     print("=" * 60)
-    
-    # Create directories
-    os.makedirs(save_path, exist_ok=True)
-    os.makedirs(log_path, exist_ok=True)
     
     # Create training environment
     print("\nCreating training environment...")
@@ -377,7 +455,7 @@ def train_dqn(
         env=train_env,
         verbose=verbose,
         seed=seed,
-        tensorboard_log=log_path,
+        tensorboard_log=str(tensorboard_dir),
         device='auto',
         **config
     )
@@ -385,15 +463,15 @@ def train_dqn(
     # Setup callbacks
     checkpoint_callback = CheckpointCallback(
         save_freq=10000,
-        save_path=save_path,
+        save_path=str(models_dir),
         name_prefix="monopoly_dqn"
     )
     
     eval_callback = EvalCallback(
         eval_env,
-        best_model_save_path=save_path,
-        log_path=log_path,
-        eval_freq=eval_freq,
+        best_model_save_path=str(models_dir),
+        log_path=str(output_dir / 'logs'),
+        eval_freq=eval_interval,
         n_eval_episodes=n_eval_episodes,
         deterministic=True,
         render=False,
@@ -402,10 +480,18 @@ def train_dqn(
     
     tensorboard_callback = TensorboardCallback(verbose=verbose)
     
+    metrics_callback = MetricsCSVCallback(
+        csv_path=str(csv_path),
+        run_id=run_id,
+        seed=seed,
+        verbose=verbose
+    )
+    
     callback_list = CallbackList([
         checkpoint_callback,
         eval_callback,
-        tensorboard_callback
+        tensorboard_callback,
+        metrics_callback
     ])
     
     # Train
@@ -428,15 +514,102 @@ def train_dqn(
     print(f"Average speed: {total_timesteps / training_time:.1f} timesteps/second")
     
     # Save final model
-    final_path = os.path.join(save_path, "monopoly_dqn_final")
-    model.save(final_path)
+    final_path = models_dir / "monopoly_dqn_final"
+    model.save(str(final_path))
     print(f"\nFinal model saved to: {final_path}.zip")
+    
+    # Print summary
+    print("\n" + "=" * 60)
+    print("Training Complete!")
+    print("=" * 60)
+    print(f"Model saved to: {models_dir}")
+    print(f"Metrics saved to: {csv_path}")
+    print(f"TensorBoard logs: {tensorboard_dir}")
+    print("=" * 60)
     
     # Cleanup
     train_env.close()
     eval_env.close()
     
     return model
+
+
+# ============================================================================
+# DDQN-Hybrid Training Function
+# ============================================================================
+
+def train_ddqn_hybrid(
+    total_timesteps: int = 100000,
+    max_turns: int = 500,
+    output_dir: str = 'runs/ddqn_hybrid',
+    seed: int = 42,
+    eval_interval: int = 10000,
+    eval_episodes: int = 100,
+    verbose: int = 1,
+    config: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Train using custom DDQN-Hybrid trainer with PyTorch.
+    
+    Uses the same environment, reward function, and action masking
+    as the SB3 DQN path, but with a custom Double-DQN implementation.
+    
+    Args:
+        total_timesteps: Total training timesteps
+        max_turns: Maximum turns per episode
+        output_dir: Output directory for models/logs/metrics
+        seed: Random seed
+        eval_interval: Steps between evaluations
+        eval_episodes: Number of evaluation episodes
+        verbose: Verbosity level
+        config: Optional hyperparameter overrides
+    """
+    # Set seeds
+    set_global_seeds(seed)
+    
+    # Import DDQN trainer
+    from Monopoly.agents.ddqn_hybrid import DDQNHybridTrainer
+    
+    # Create environments (same as DQN path)
+    print("Creating training environment...")
+    train_env = make_monopoly_env(
+        max_turns=max_turns,
+        seed=seed,
+        flatten=True
+    )
+    
+    print("Creating evaluation environment...")
+    eval_env = make_monopoly_env(
+        max_turns=max_turns,
+        seed=seed + 1000,
+        flatten=True
+    )
+    
+    # Create trainer
+    trainer = DDQNHybridTrainer(
+        env=train_env,
+        eval_env=eval_env,
+        output_dir=output_dir,
+        seed=seed,
+        device='auto',
+        config=config,
+        verbose=verbose
+    )
+    
+    # Train
+    results = trainer.train(
+        total_timesteps=total_timesteps,
+        eval_interval=eval_interval,
+        eval_episodes=eval_episodes,
+        log_interval=1000,
+        save_interval=50000,
+        progress_bar=True
+    )
+    
+    # Cleanup
+    trainer.close()
+    
+    return results
 
 
 # ============================================================================
@@ -465,6 +638,8 @@ def evaluate_model(
     Returns:
         Dictionary of evaluation metrics
     """
+    set_global_seeds(seed)
+    
     print("=" * 60)
     print("Evaluating Monopoly DQN Agent (4-Player Mode)")
     print("=" * 60)
@@ -575,6 +750,8 @@ def run_random_baseline(
     """
     Run random agent baseline for comparison in 4-player mode.
     """
+    set_global_seeds(seed)
+    
     print("=" * 60)
     print("Running Random Agent Baseline (4-Player Mode)")
     print("=" * 60)
@@ -642,40 +819,90 @@ def run_random_baseline(
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Train or evaluate a DQN agent for Monopoly (4-Player Mode)')
+    parser = argparse.ArgumentParser(
+        description='Train or evaluate DQN/DDQN agents for Monopoly (4-Player Mode)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Train with SB3 DQN
+    python train_dqn.py --agent dqn --total_timesteps 2000000 --output_dir runs/dqn_seed42
     
-    # Mode
+    # Train with DDQN-Hybrid
+    python train_dqn.py --agent ddqn_hybrid --total_timesteps 2000000 --output_dir runs/ddqn_hybrid_seed42
+    
+    # Evaluate a model
+    python train_dqn.py --evaluate --model runs/dqn_seed42/models/dqn/monopoly_dqn_final.zip
+    
+    # Run baseline
+    python train_dqn.py --baseline --episodes 100
+"""
+    )
+    
+    # Mode selection
     parser.add_argument('--train', action='store_true', help='Train a new model')
     parser.add_argument('--evaluate', action='store_true', help='Evaluate a trained model')
     parser.add_argument('--baseline', action='store_true', help='Run random baseline')
     
+    # Agent selection
+    parser.add_argument('--agent', type=str, default='dqn', 
+                       choices=['dqn', 'ddqn_hybrid'],
+                       help='Agent type: dqn (SB3) or ddqn_hybrid (custom PyTorch)')
+    
     # Training parameters
-    parser.add_argument('--timesteps', type=int, default=100000, help='Total training timesteps')
+    parser.add_argument('--total_timesteps', type=int, default=100000, 
+                       help='Total training timesteps')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--eval_interval', type=int, default=10000,
+                       help='Steps between evaluations')
+    parser.add_argument('--output_dir', type=str, default='runs/',
+                       help='Output directory for models/logs/metrics')
+    
+    # DQN-specific
     parser.add_argument('--config', type=str, default='default', 
-                       choices=['default', 'fast', 'thorough'], help='Hyperparameter preset')
+                       choices=['default', 'fast', 'thorough'],
+                       help='Hyperparameter preset (DQN only)')
     
     # Environment parameters
-    parser.add_argument('--max-turns', type=int, default=500, help='Maximum turns per episode')
+    parser.add_argument('--max_turns', type=int, default=500, 
+                       help='Maximum turns per episode')
     
     # Evaluation parameters
     parser.add_argument('--model', type=str, default='models/monopoly_dqn_final.zip',
                        help='Path to model for evaluation')
-    parser.add_argument('--episodes', type=int, default=100, help='Number of evaluation episodes')
+    parser.add_argument('--episodes', type=int, default=100, 
+                       help='Number of evaluation episodes')
     
     # Other
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--verbose', type=int, default=1, help='Verbosity level')
     
     args = parser.parse_args()
     
+    # Determine output directory based on agent type
+    if args.output_dir == 'runs/':
+        args.output_dir = f'runs/{args.agent}_seed{args.seed}'
+    
     if args.train:
-        train_dqn(
-            total_timesteps=args.timesteps,
-            max_turns=args.max_turns,
-            config_preset=args.config,
-            seed=args.seed,
-            verbose=args.verbose
-        )
+        if args.agent == 'dqn':
+            train_dqn(
+                total_timesteps=args.total_timesteps,
+                max_turns=args.max_turns,
+                config_preset=args.config,
+                output_dir=args.output_dir,
+                seed=args.seed,
+                eval_interval=args.eval_interval,
+                n_eval_episodes=10,
+                verbose=args.verbose
+            )
+        elif args.agent == 'ddqn_hybrid':
+            train_ddqn_hybrid(
+                total_timesteps=args.total_timesteps,
+                max_turns=args.max_turns,
+                output_dir=args.output_dir,
+                seed=args.seed,
+                eval_interval=args.eval_interval,
+                eval_episodes=100,
+                verbose=args.verbose
+            )
     
     if args.evaluate:
         evaluate_model(
@@ -696,11 +923,14 @@ def main():
         print("Please specify --train, --evaluate, or --baseline")
         print("Run with --help for usage information")
         print("\n4-Player Mode:")
-        print("  Player 0: RL Agent (DQN)")
+        print("  Player 0: RL Agent (DQN/DDQN)")
         print("  Player 1: Random Bot")
         print("  Player 2: MCTS Bot")
         print("  Player 3: Greedy Bot")
         print("\nReward: Net worth relative to other active players")
+        print("\nAgent types:")
+        print("  --agent dqn         : Stable-Baselines3 DQN")
+        print("  --agent ddqn_hybrid : Custom PyTorch Double-DQN")
 
 
 if __name__ == "__main__":

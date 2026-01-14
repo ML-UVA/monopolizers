@@ -220,3 +220,36 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ============================================================================
+# Monopoly RL Training Artifacts
+# ============================================================================
+
+# Training runs directory (models, logs, metrics)
+runs/
+
+# Model files
+models/
+*.pt
+*.pth
+*.zip
+*.pkl
+
+# Replay buffers (can be very large)
+buffers/
+*.buffer
+*_buffer.pkl
+
+# TensorBoard logs in logs/ subdirectories
+logs/DQN*/
+logs/DDQN*/
+events.out.tfevents.*
+
+# Checkpoints
+checkpoints/
+
+# Evaluation results
+evaluations/
+
+# CSV metrics files (regenerate from training)
+# *.csv  # Uncomment if you don't want to commit any CSV files
