@@ -2,6 +2,10 @@
 """
 Monopoly RL Training Script - DQN and DDQN-Hybrid Modes
 
+RESEARCH FOCUS (H1): Comparing reward shaping strategies for long-horizon games.
+- 'dense_networth': r = nw_agent / sum(nw_others) every step
+- 'sparse_terminal': +1 win, -1 lose, 0 otherwise
+
 This script provides training pipelines for both:
 - SB3 DQN (Stable-Baselines3 implementation)
 - DDQN-Hybrid (Custom PyTorch Double-DQN with action masking)
@@ -12,17 +16,15 @@ Four-Player Mode:
 - Player 2: MCTS Bot
 - Player 3: Greedy Bot
 
-Reward System (Net Worth Based):
-- No reward for winning/losing
-- Reward = agent_net_worth / sum(other_active_players_net_worth)
-- Net worth = cash + sum(property_values)
-
 Example Usage:
-    # Train with SB3 DQN
-    python train_dqn.py --agent dqn --total_timesteps 2000000 --output_dir runs/dqn_seed42
+    # Train with dense net-worth reward (default)
+    python train_dqn.py --train --agent dqn --reward_mode dense_networth --seed 42
+    
+    # Train with sparse terminal reward (ablation)
+    python train_dqn.py --train --agent dqn --reward_mode sparse_terminal --seed 42
 
-    # Train with custom DDQN-Hybrid
-    python train_dqn.py --agent ddqn_hybrid --total_timesteps 2000000 --output_dir runs/ddqn_hybrid_seed42
+    # Train with DDQN-Hybrid
+    python train_dqn.py --train --agent ddqn_hybrid --reward_mode dense_networth --seed 42
 
     # Evaluate a trained model
     python train_dqn.py --evaluate --model runs/dqn_seed42/models/dqn/monopoly_dqn_final.zip
@@ -66,7 +68,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 
 # Monopoly Environment
-from Monopoly.envs.gym_env import MonopolyEnv
+from Monopoly.envs.gym_env import MonopolyEnv, RewardMode
 from Monopoly.envs.wrappers import MonopolyFlattenWrapper
 from Monopoly.agents.random import RandomAgent
 from Monopoly.agents.greedy import GreedyAgent
@@ -191,9 +193,9 @@ class MetricsCSVCallback(BaseCallback):
 def create_opponent_agents(seed: int = 42) -> list:
     """
     Create the three opponent agents for 4-player mode:
-    - Player 1: Random Bot
-    - Player 2: MCTS Bot (with lightweight engine for simulations)
-    - Player 3: Greedy Bot
+    - Player 1: Random Bot (seeded)
+    - Player 2: MCTS Bot (seeded, with lightweight engine for simulations)
+    - Player 3: Greedy Bot (deterministic)
     
     Args:
         seed: Random seed for reproducibility
@@ -209,10 +211,11 @@ def create_opponent_agents(seed: int = 42) -> list:
     rules_engine = RulesEngine(board, property_specs, chance_cards, community_cards)
     mcts_engine = GameEngine(rules_engine, seed=seed)
     
+    # Use derived seeds for each opponent for reproducibility
     opponents = [
-        RandomAgent(player_id=1),
-        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=5, max_depth=5),  # Lightweight MCTS
-        GreedyAgent(player_id=3),
+        RandomAgent(player_id=1, seed=seed + 100),
+        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=5, max_depth=5, seed=seed + 200),
+        GreedyAgent(player_id=3),  # Deterministic, no seed needed
     ]
     
     return opponents
@@ -224,6 +227,7 @@ def make_monopoly_env(
     max_turns: int = 500,
     seed: Optional[int] = None,
     flatten: bool = True,
+    reward_mode: RewardMode = 'dense_networth',
 ) -> gym.Env:
     """
     Create a Monopoly environment with 4 players:
@@ -232,31 +236,33 @@ def make_monopoly_env(
     - Player 2: MCTS Bot
     - Player 3: Greedy Bot
     
-    Uses net worth-based reward system (no win/lose rewards).
-    
     Args:
         num_players: Number of players (always 4 for this setup)
         agent_player_id: Player ID for the RL agent (always 0)
         max_turns: Maximum turns before truncation
         seed: Random seed
         flatten: Whether to flatten observations
+        reward_mode: Reward strategy (H1 ablation)
+            - 'dense_networth': r = nw_agent / sum(nw_others) every step
+            - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
         
     Returns:
         Gymnasium environment
     """
-    # Create opponent agents
+    # Create opponent agents with derived seeds
     opponents = create_opponent_agents(seed=seed or 42)
     
-    # Create base environment
+    # Create base environment with configurable reward mode
     env = MonopolyEnv(
         num_players=4,
         agent_player_id=0,
         opponent_policies=opponents,
         max_turns=max_turns,
-        seed=seed
+        seed=seed,
+        reward_mode=reward_mode
     )
     
-    # Apply flatten wrapper (no reward shaping - using net worth reward)
+    # Apply flatten wrapper
     if flatten:
         env = MonopolyFlattenWrapper(env)
     
@@ -269,7 +275,8 @@ def make_monopoly_env(
 def make_vec_env(
     n_envs: int = 1,
     max_turns: int = 500,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    reward_mode: RewardMode = 'dense_networth',
 ) -> VecMonitor:
     """
     Create a vectorized environment for parallel training.
@@ -278,6 +285,7 @@ def make_vec_env(
         n_envs: Number of parallel environments
         max_turns: Maximum turns
         seed: Base random seed
+        reward_mode: Reward strategy (H1 ablation)
         
     Returns:
         Vectorized environment
@@ -287,7 +295,8 @@ def make_vec_env(
             env_seed = seed + env_id if seed is not None else None
             return make_monopoly_env(
                 max_turns=max_turns,
-                seed=env_seed
+                seed=env_seed,
+                reward_mode=reward_mode
             )
         return _init
     
@@ -374,7 +383,8 @@ def train_dqn(
     seed: int = 42,
     eval_interval: int = 5000,
     n_eval_episodes: int = 10,
-    verbose: int = 1
+    verbose: int = 1,
+    reward_mode: RewardMode = 'dense_networth'
 ) -> DQN:
     """
     Train a DQN agent using Stable-Baselines3.
@@ -385,8 +395,6 @@ def train_dqn(
     - Player 2: MCTS Bot
     - Player 3: Greedy Bot
     
-    Reward: Net worth relative to other players (no win/lose bonus)
-    
     Args:
         total_timesteps: Total training timesteps
         max_turns: Maximum turns per episode
@@ -396,6 +404,9 @@ def train_dqn(
         eval_interval: Evaluation frequency
         n_eval_episodes: Number of evaluation episodes
         verbose: Verbosity level
+        reward_mode: Reward strategy (H1 ablation)
+            - 'dense_networth': r = nw_agent / sum(nw_others) every step
+            - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
         
     Returns:
         Trained DQN model
@@ -403,7 +414,7 @@ def train_dqn(
     # Set seeds
     set_global_seeds(seed)
     
-    # Setup output directories
+    # Setup output directories (include reward_mode in path)
     output_dir = Path(output_dir)
     models_dir = output_dir / 'models' / 'dqn'
     results_dir = output_dir / 'results'
@@ -418,30 +429,32 @@ def train_dqn(
     csv_path = results_dir / 'dqn_metrics.csv'
     
     print("=" * 60)
-    print("Monopoly DQN Training (4-Player Mode)")
+    print("Monopoly DQN Training (4-Player Mode) - H1 Ablation")
     print("=" * 60)
     print(f"Total timesteps: {total_timesteps}")
     print(f"Players: 4 (RL Agent vs Random, MCTS, Greedy)")
-    print(f"Reward: Net worth relative to opponents")
+    print(f"Reward mode: {reward_mode}")
     print(f"Config preset: {config_preset}")
     print(f"Seed: {seed}")
     print(f"Output directory: {output_dir}")
     print("=" * 60)
     
-    # Create training environment
-    print("\nCreating training environment...")
+    # Create training environment with configured reward mode
+    print(f"\nCreating training environment (reward_mode={reward_mode})...")
     train_env = make_vec_env(
         n_envs=1,
         max_turns=max_turns,
-        seed=seed
+        seed=seed,
+        reward_mode=reward_mode
     )
     
-    # Create evaluation environment
+    # Create evaluation environment with same reward mode
     print("Creating evaluation environment...")
     eval_env = make_vec_env(
         n_envs=1,
         max_turns=max_turns,
-        seed=seed + 1000
+        seed=seed + 1000,
+        reward_mode=reward_mode
     )
     
     # Get hyperparameters
@@ -543,16 +556,17 @@ def train_ddqn_hybrid(
     max_turns: int = 500,
     output_dir: str = 'runs/ddqn_hybrid',
     seed: int = 42,
-    eval_interval: int = 10000,
+    eval_interval: int = 100000,
     eval_episodes: int = 100,
     verbose: int = 1,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    reward_mode: RewardMode = 'dense_networth'
 ) -> None:
     """
     Train using custom DDQN-Hybrid trainer with PyTorch.
     
-    Uses the same environment, reward function, and action masking
-    as the SB3 DQN path, but with a custom Double-DQN implementation.
+    Uses the same environment and action masking as the SB3 DQN path,
+    but with a custom Double-DQN implementation.
     
     Args:
         total_timesteps: Total training timesteps
@@ -563,6 +577,9 @@ def train_ddqn_hybrid(
         eval_episodes: Number of evaluation episodes
         verbose: Verbosity level
         config: Optional hyperparameter overrides
+        reward_mode: Reward strategy (H1 ablation)
+            - 'dense_networth': r = nw_agent / sum(nw_others) every step
+            - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
     """
     # Set seeds
     set_global_seeds(seed)
@@ -570,19 +587,29 @@ def train_ddqn_hybrid(
     # Import DDQN trainer
     from Monopoly.agents.ddqn_hybrid import DDQNHybridTrainer
     
-    # Create environments (same as DQN path)
-    print("Creating training environment...")
+    print("=" * 60)
+    print("Monopoly DDQN-Hybrid Training (4-Player Mode) - H1 Ablation")
+    print("=" * 60)
+    print(f"Total timesteps: {total_timesteps}")
+    print(f"Reward mode: {reward_mode}")
+    print(f"Seed: {seed}")
+    print("=" * 60)
+    
+    # Create environments with configured reward mode
+    print(f"\nCreating training environment (reward_mode={reward_mode})...")
     train_env = make_monopoly_env(
         max_turns=max_turns,
         seed=seed,
-        flatten=True
+        flatten=True,
+        reward_mode=reward_mode
     )
     
     print("Creating evaluation environment...")
     eval_env = make_monopoly_env(
         max_turns=max_turns,
         seed=seed + 1000,
-        flatten=True
+        flatten=True,
+        reward_mode=reward_mode
     )
     
     # Create trainer
@@ -600,7 +627,7 @@ def train_ddqn_hybrid(
     results = trainer.train(
         total_timesteps=total_timesteps,
         eval_interval=eval_interval,
-        eval_episodes=eval_episodes,
+        eval_episodes=min(eval_episodes, 50),
         log_interval=1000,
         save_interval=50000,
         progress_bar=True
@@ -852,7 +879,7 @@ Examples:
     parser.add_argument('--total_timesteps', type=int, default=100000, 
                        help='Total training timesteps')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--eval_interval', type=int, default=10000,
+    parser.add_argument('--eval_interval', type=int, default=100000,
                        help='Steps between evaluations')
     parser.add_argument('--output_dir', type=str, default='runs/',
                        help='Output directory for models/logs/metrics')
@@ -866,6 +893,11 @@ Examples:
     parser.add_argument('--max_turns', type=int, default=500, 
                        help='Maximum turns per episode')
     
+    # H1 Ablation: Reward mode
+    parser.add_argument('--reward_mode', type=str, default='dense_networth',
+                       choices=['dense_networth', 'sparse_terminal'],
+                       help='Reward strategy for H1 ablation: dense_networth (shaped) or sparse_terminal')
+    
     # Evaluation parameters
     parser.add_argument('--model', type=str, default='models/monopoly_dqn_final.zip',
                        help='Path to model for evaluation')
@@ -877,9 +909,9 @@ Examples:
     
     args = parser.parse_args()
     
-    # Determine output directory based on agent type
+    # Determine output directory based on agent type and reward mode
     if args.output_dir == 'runs/':
-        args.output_dir = f'runs/{args.agent}_seed{args.seed}'
+        args.output_dir = f'runs/{args.agent}_{args.reward_mode}_seed{args.seed}'
     
     if args.train:
         if args.agent == 'dqn':
@@ -891,6 +923,7 @@ Examples:
                 seed=args.seed,
                 eval_interval=args.eval_interval,
                 n_eval_episodes=10,
+                reward_mode=args.reward_mode,
                 verbose=args.verbose
             )
         elif args.agent == 'ddqn_hybrid':
@@ -901,6 +934,7 @@ Examples:
                 seed=args.seed,
                 eval_interval=args.eval_interval,
                 eval_episodes=100,
+                reward_mode=args.reward_mode,
                 verbose=args.verbose
             )
     
@@ -927,7 +961,9 @@ Examples:
         print("  Player 1: Random Bot")
         print("  Player 2: MCTS Bot")
         print("  Player 3: Greedy Bot")
-        print("\nReward: Net worth relative to other active players")
+        print("\nH1 Ablation - Reward Modes:")
+        print("  --reward_mode dense_networth  : Shaped reward (default)")
+        print("  --reward_mode sparse_terminal : Sparse +1/-1 terminal reward")
         print("\nAgent types:")
         print("  --agent dqn         : Stable-Baselines3 DQN")
         print("  --agent ddqn_hybrid : Custom PyTorch Double-DQN")

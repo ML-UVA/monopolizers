@@ -1,4 +1,77 @@
-from typing import Callable, Optional, Tuple, Dict, Any, List
+"""Gymnasium wrapper for the Monopoly game engine.
+
+================================================================================
+RESEARCH FOCUS (H1): Reward Shaping in Long-Horizon Stochastic Games
+================================================================================
+
+Hypothesis: Dense relative-net-worth reward improves learning speed and final
+performance compared to sparse terminal win/loss reward in stochastic Monopoly RL.
+
+This environment provides a single-agent interface where one player (the RL agent)
+learns against a fixed mixture of opponent policies (Random, MCTS, Greedy).
+
+================================================================================
+REWARD MODES (H1 Ablation Variable)
+================================================================================
+
+1. reward_mode='dense_networth' (Default)
+   - Every step: r_t = NW_agent / Σ(NW_opponents)
+   - At termination: r_T = 0
+   - Rationale: Provides continuous learning signal based on relative wealth
+
+2. reward_mode='sparse_terminal'
+   - During play: r_t = 0
+   - At termination: r_T = +1 (win) or -1 (lose)
+   - Rationale: Standard game-theoretic outcome signal
+
+Net Worth Computation:
+   NW_x = cash_x + Σ(property_value(p) for p in owned_properties)
+   
+   property_value(p) = {
+       0                                    if mortgaged
+       (price - mortgage_value) * bonus     if unmortgaged, no houses
+       + houses * house_cost                if has houses
+       + house_cost                         if hotel (houses=5)
+   }
+   where bonus = 2.0 if monopoly else 1.5
+
+================================================================================
+ACTION SPACE (Discrete, with Trading)
+================================================================================
+
+Actions 0-89: Base actions
+   0: Roll dice
+   1: Buy property (if awaiting buy decision)
+   2: Pass on buying
+   3-30: Build house on property idx (3 + prop_idx)
+   31-58: Mortgage property idx (31 + prop_idx)
+   59-86: Unmortgage property idx (59 + prop_idx)
+   87: Pay jail fine ($50)
+   88: Use get-out-of-jail card
+   89: End turn
+
+Actions 90+: Trade actions (sell property to opponent for fixed price)
+   Encoding: action = 90 + prop_idx * (num_players - 1) + opponent_offset
+   
+   For 4 players: 84 trade actions (28 properties × 3 opponents)
+   Total action space: 174 actions
+
+Trading is deterministic: if the opponent can afford the fixed price
+(1.5 × mortgage_value), the trade is automatically accepted.
+
+================================================================================
+FOUR-PLAYER MODE (Default)
+================================================================================
+
+Player 0: RL Agent (generates training data)
+Player 1: Random Bot (seeded for reproducibility)
+Player 2: MCTS Bot (seeded, rollouts=5, depth=5)
+Player 3: Greedy Bot (deterministic)
+
+See RESEARCH_IMPLEMENTATION_AUDIT_NOTES.txt for full experimental protocol.
+"""
+
+from typing import Callable, Literal, Optional, Tuple, Dict, Any, List
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -8,56 +81,39 @@ from ..state import GameState, PlayerState, PropertyState, DeckState, PlayerStat
 from ..board import Board
 from ..property import load_property_specs
 from ..cards import load_chance_cards, load_community_cards
+from ..trade import decode_trade_action, encode_trade_action, compute_trade_price
 from .renderer import MonopolyRenderer
 
 
-"""Gymnasium wrapper for the Monopoly game engine.
-
-This environment provides a single-agent interface where one player is controlled
-by an RL agent and opponents follow fixed policies (e.g., random, greedy, MCTS).
-
-Four-player mode:
-- Player 0: RL Agent (generates training data)
-- Player 1: Random Bot
-- Player 2: MCTS Bot  
-- Player 3: Greedy Bot
-
-Reward system based on relative net worth:
-r_x = nw_x / sum(nw_other_active_players)
-"""
+# Type alias for reward mode configuration (H1 ablation variable)
+RewardMode = Literal['dense_networth', 'sparse_terminal']
 
 
 class MonopolyEnv(gym.Env):
     """
-    Monopoly Gymnasium Environment
+    Monopoly Gymnasium Environment with Trading Support
     
-    Action Space: Discrete(n_actions) where actions are:
-        0: Roll dice (start turn)
-        1: Buy property (if landed on unowned)
-        2: Pass on buying
-        3-30: Build house on property idx (3 + property_idx)
-        31-58: Mortgage property idx (31 + property_idx)
-        59-86: Unmortgage property idx (59 + property_idx)
-        87: Pay jail fine
-        88: Use get-out-of-jail card
-        89: End turn / Pass
+    This environment implements a research-grade Monopoly simulator designed
+    for studying reward shaping in long-horizon stochastic games (H1).
+    
+    Key Features:
+    - Configurable reward modes for ablation study
+    - Trading integrated into discrete action space
+    - Legal action masking for all action types
+    - Reproducible via explicit seeding
+    
+    Action Space: Discrete(n_actions) where:
+        - Actions 0-89: Base Monopoly actions (roll, buy, build, mortgage, etc.)
+        - Actions 90+: Trade actions (sell property to opponent)
         
-    Observation Space: Dict with:
-        - player_id: Box (agent's player id)
-        - cash: Box (n_players,) - cash for each player
-        - positions: Box (n_players,) - board position for each player
-        - property_owner: Box (28,) - owner id or -1 for unowned
-        - houses: Box (28,) - house count (0-5, 5=hotel)
-        - mortgaged: Box (28,) - binary mortgage status
-        - jail_turns: Box (n_players,) - turns in jail
-        - get_out_cards: Box (n_players,) - jail cards held
-        - legal_mask: Box (n_actions,) - binary legal action mask
-        - turn_number: Box - current turn
-        - last_roll: Box (2,) - last dice roll
-        - net_worth: Box (n_players,) - computed net worth for each player
+    Observation Space: Dict with game state, legal mask, and net worth
     """
     
     metadata = {'render_modes': ['human', 'ansi'], 'render_fps': 1}
+    
+    # Action space constants
+    N_BASE_ACTIONS = 90
+    N_PROPERTIES = 28
     
     def __init__(
         self,
@@ -66,8 +122,22 @@ class MonopolyEnv(gym.Env):
         opponent_policies: Optional[List[Callable]] = None,
         max_turns: int = 1000,
         render_mode: Optional[str] = None,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        reward_mode: RewardMode = 'dense_networth'
     ):
+        """Initialize the Monopoly environment.
+        
+        Args:
+            num_players: Number of players (default 4)
+            agent_player_id: Which player index the RL agent controls (default 0)
+            opponent_policies: List of Agent instances for opponents
+            max_turns: Maximum game turns before truncation (default 1000)
+            render_mode: 'human', 'ansi', or None
+            seed: Random seed for reproducibility
+            reward_mode: Reward strategy for H1 ablation study
+                - 'dense_networth': r = NW_agent / Σ(NW_others) every step
+                - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
+        """
         super().__init__()
         
         self.num_players = num_players
@@ -75,6 +145,14 @@ class MonopolyEnv(gym.Env):
         self.max_turns = max_turns
         self.render_mode = render_mode
         self._seed = seed or 42
+        self.reward_mode: RewardMode = reward_mode
+        
+        # Validate reward_mode
+        if reward_mode not in ('dense_networth', 'sparse_terminal'):
+            raise ValueError(
+                f"Invalid reward_mode '{reward_mode}'. "
+                f"Must be 'dense_networth' or 'sparse_terminal'."
+            )
         
         # Initialize game components
         self.board = Board.load_standard_board()
@@ -88,7 +166,7 @@ class MonopolyEnv(gym.Env):
         # Opponent policies (default to random if not provided)
         self.opponent_policies = opponent_policies or []
         
-        # Fill missing opponents with RandomAgent and assign player IDs
+        # Fill missing opponents with seeded RandomAgent and assign player IDs
         current_opp_idx = 0
         for i in range(num_players):
             if i == agent_player_id:
@@ -100,18 +178,20 @@ class MonopolyEnv(gym.Env):
                 if agent.player_id == -1:
                     agent.player_id = i
             else:
-                # Add default RandomAgent
+                # Add default RandomAgent with deterministic seed
                 from ..agents.random import RandomAgent
-                self.opponent_policies.append(RandomAgent(player_id=i))
+                opp_seed = self._seed + 1000 + i if self._seed is not None else None
+                self.opponent_policies.append(RandomAgent(player_id=i, seed=opp_seed))
             current_opp_idx += 1
 
-        
-        # Action space: simplified discrete actions
-        # 0: roll, 1: buy, 2: pass, 3-30: build, 31-58: mortgage, 59-86: unmortgage, 87: pay jail, 88: use jail card, 89: end turn
-        self.n_actions = 90
+        # Compute action space size
+        # Base actions: 90 (roll, buy, pass, build×28, mortgage×28, unmortgage×28, pay_fine, use_jail_card, end_turn)
+        # Trade actions: 28 properties × (num_players - 1) opponents
+        self.n_trade_actions = self.N_PROPERTIES * (num_players - 1)
+        self.n_actions = self.N_BASE_ACTIONS + self.n_trade_actions
         self.action_space = spaces.Discrete(self.n_actions)
         
-        # Observation space (includes net_worth for all players)
+        # Observation space (includes net_worth for reward computation visibility)
         self.observation_space = spaces.Dict({
             'player_id': spaces.Box(0, num_players-1, shape=(1,), dtype=np.int32),
             'cash': spaces.Box(0, 100000, shape=(num_players,), dtype=np.float32),
@@ -133,6 +213,9 @@ class MonopolyEnv(gym.Env):
         self.state: Optional[GameState] = None
         self.engine: Optional[GameEngine] = None
         self._episode_step = 0
+        
+        # Net worth cache (invalidated each step to avoid stale data)
+        self._net_worth_cache: Optional[np.ndarray] = None
         
         # Pygame renderer
         self.renderer: Optional[MonopolyRenderer] = None
@@ -209,6 +292,23 @@ class MonopolyEnv(gym.Env):
         
         return nw
 
+    def _refresh_net_worth_cache(self) -> np.ndarray:
+        """
+        Compute and cache net worth for all players.
+        Called once per step to avoid redundant computation.
+        """
+        self._net_worth_cache = np.array(
+            [self._compute_net_worth(i) for i in range(self.num_players)], 
+            dtype=np.float32
+        )
+        return self._net_worth_cache
+
+    def _get_cached_net_worth(self, player_id: int) -> float:
+        """Get net worth from cache (must call _refresh_net_worth_cache first)."""
+        if self._net_worth_cache is None:
+            self._refresh_net_worth_cache()
+        return float(self._net_worth_cache[player_id])
+
     def _compute_net_worth_reward(self, player_id: int) -> float:
         """
         Compute the relative net worth reward:
@@ -216,14 +316,16 @@ class MonopolyEnv(gym.Env):
         
         Returns value between 0 and 1 (can be > 1 if agent dominates).
         Returns 0 if no other active players (shouldn't happen during game).
+        
+        Uses cached net worth values for efficiency.
         """
-        agent_nw = self._compute_net_worth(player_id)
+        agent_nw = self._get_cached_net_worth(player_id)
         
         # Sum net worth of all OTHER active players
         other_nw_sum = 0.0
         for i, p in enumerate(self.state.players):
             if i != player_id and p.status == PlayerStatus.ACTIVE:
-                other_nw_sum += self._compute_net_worth(i)
+                other_nw_sum += self._get_cached_net_worth(i)
         
         # Avoid division by zero
         if other_nw_sum <= 0:
@@ -231,6 +333,58 @@ class MonopolyEnv(gym.Env):
         
         reward = agent_nw / other_nw_sum
         return reward
+
+    def _compute_reward(self, terminated: bool, truncated: bool) -> float:
+        """
+        Compute reward based on configured reward_mode (H1 ablation variable).
+        
+        Reward modes:
+        - 'dense_networth': r = nw_agent / sum(nw_others) every step, 0 at terminal
+        - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
+        
+        Args:
+            terminated: Whether the game ended (one player left)
+            truncated: Whether max_turns was exceeded
+            
+        Returns:
+            Reward scalar for this step
+        """
+        agent_status = self.state.players[self.agent_player_id].status
+        
+        if self.reward_mode == 'dense_networth':
+            # Dense relative net-worth reward during play, 0 at terminal
+            if terminated or truncated:
+                return 0.0
+            return self._compute_net_worth_reward(self.agent_player_id)
+        
+        elif self.reward_mode == 'sparse_terminal':
+            # Sparse terminal reward only
+            if terminated:
+                if agent_status == PlayerStatus.ACTIVE:
+                    # Agent is last player standing → win
+                    return 1.0
+                else:
+                    # Agent went bankrupt → lose
+                    return -1.0
+            elif truncated:
+                # Game timed out - use net worth comparison as tie-breaker
+                agent_nw = self._get_cached_net_worth(self.agent_player_id)
+                max_other_nw = max(
+                    (self._get_cached_net_worth(i) for i in range(self.num_players) 
+                     if i != self.agent_player_id and self.state.players[i].status == PlayerStatus.ACTIVE),
+                    default=0.0
+                )
+                if agent_nw > max_other_nw:
+                    return 1.0  # Win on net worth
+                elif agent_nw < max_other_nw:
+                    return -1.0  # Lose on net worth
+                else:
+                    return 0.0  # Tie
+            else:
+                return 0.0  # No reward during play
+        
+        else:
+            raise ValueError(f"Unknown reward_mode: {self.reward_mode}")
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Reset the environment to initial state."""
@@ -276,6 +430,13 @@ class MonopolyEnv(gym.Env):
         
         self.engine = GameEngine(self.rules_engine, seed=self._seed)
         self._episode_step = 0
+        self._net_worth_cache = None  # Invalidate cache for new episode
+        
+        # Reset opponent agents' RNG for reproducibility
+        for i, agent in enumerate(self.opponent_policies):
+            if hasattr(agent, 'reset'):
+                opp_seed = self._seed + 1000 + agent.player_id if self._seed is not None else None
+                agent.reset(seed=opp_seed)
         
         # If agent is not first player, simulate opponent turns until agent's turn
         while self.state.current_player != self.agent_player_id and not self._is_game_over():
@@ -292,9 +453,9 @@ class MonopolyEnv(gym.Env):
         Only the RL agent's actions generate rewards and training data.
         Opponents take turns but don't contribute to training.
         
-        Reward system: No reward for winning/losing.
-        Reward is computed as relative net worth only when game is NOT over:
-        r_x = nw_x / sum(nw_other_active_players)
+        Reward system (controlled by self.reward_mode - H1 ablation):
+        - 'dense_networth': r_x = nw_x / sum(nw_other_active_players) every step
+        - 'sparse_terminal': +1 for win, -1 for lose, 0 otherwise
         """
         if self.state is None:
             raise RuntimeError("Must call reset() before step()")
@@ -329,17 +490,14 @@ class MonopolyEnv(gym.Env):
         
         self._episode_step += 1
         
-        # Compute net worth-based reward ONLY if game is not over
-        # No reward for winning/losing - only relative net worth during game
+        # Refresh net worth cache once per step (used by reward, obs, info)
+        self._refresh_net_worth_cache()
+        
+        # Compute reward based on configured reward_mode (H1 ablation variable)
         terminated = self._is_game_over()
         truncated = self._episode_step >= self.max_turns
         
-        if terminated or truncated:
-            # No reward when game ends
-            reward = 0.0
-        else:
-            # Compute relative net worth reward
-            reward = self._compute_net_worth_reward(self.agent_player_id)
+        reward = self._compute_reward(terminated, truncated)
         
         # Simulate opponent turns only if it's no longer the agent's turn
         while (self.state.current_player != self.agent_player_id and 
@@ -349,13 +507,29 @@ class MonopolyEnv(gym.Env):
             # Recompute termination after opponent turns
             terminated = self._is_game_over()
         
+        # Refresh cache again after opponent turns (state may have changed)
+        self._refresh_net_worth_cache()
+        
         obs = self._get_observation()
         info = self._get_info()
         
         return obs, reward, terminated, truncated, info
 
     def _decode_action(self, action: int) -> Dict[str, Any]:
-        """Convert discrete action index to game action dict."""
+        """Convert discrete action index to game action dict.
+        
+        Action Encoding:
+            0: Roll dice
+            1: Buy property at current position
+            2: Pass on buying
+            3-30: Build house on property (action - 3)
+            31-58: Mortgage property (action - 31)
+            59-86: Unmortgage property (action - 59)
+            87: Pay jail fine
+            88: Use get-out-of-jail card
+            89: End turn
+            90+: Trade actions (sell property to opponent)
+        """
         if action == 0:
             return {'type': 'roll'}
         elif action == 1:
@@ -380,13 +554,26 @@ class MonopolyEnv(gym.Env):
             return {'type': 'use_jail_card'}
         elif action == 89:
             return {'type': 'end_turn'}
+        elif action >= self.N_BASE_ACTIONS:
+            # Trade action: decode to (property_idx, buyer_id)
+            result = decode_trade_action(action, self.agent_player_id, self.num_players)
+            if result is not None:
+                prop_idx, buyer_id = result
+                price = compute_trade_price(self.property_specs, prop_idx)
+                return {
+                    'type': 'trade',
+                    'property_idx': prop_idx,
+                    'buyer_id': buyer_id,
+                    'price': price
+                }
+            return {'type': 'pass'}
         else:
             return {'type': 'pass'}
 
     def _get_observation(self) -> Dict[str, Any]:
         """Generate observation from current game state."""
-        # Compute net worth for all players
-        net_worths = np.array([self._compute_net_worth(i) for i in range(self.num_players)], dtype=np.float32)
+        # Use cached net worth (refreshed at start of step)
+        net_worths = self._net_worth_cache if self._net_worth_cache is not None else self._refresh_net_worth_cache()
         
         obs = {
             'player_id': np.array([self.agent_player_id], dtype=np.int32),
@@ -410,7 +597,16 @@ class MonopolyEnv(gym.Env):
         return obs
 
     def _get_legal_mask(self) -> np.ndarray:
-        """Compute binary mask of legal actions based on current game state."""
+        """Compute binary mask of legal actions based on current game state.
+        
+        This mask is critical for:
+        1. Training with action masking (DDQN-Hybrid)
+        2. Observation (included in obs dict)
+        3. Invalid action correction
+        
+        Returns:
+            Binary array of shape (n_actions,) where 1 = legal, 0 = illegal
+        """
         mask = np.zeros(self.n_actions, dtype=np.int32)
         player = self.state.players[self.agent_player_id]
         
@@ -449,7 +645,7 @@ class MonopolyEnv(gym.Env):
             mask[2] = 1  # pass (decline to buy)
             return mask
         
-        # Post-roll phase - can build/mortgage/unmortgage and must end turn
+        # Post-roll phase - can build/mortgage/unmortgage/trade and must end turn
         
         # Building houses (on monopolies)
         for prop_idx in player.properties_owned:
@@ -472,6 +668,26 @@ class MonopolyEnv(gym.Env):
                 unmortgage_cost = int(spec.mortgage_value * 1.1)
                 if player.cash >= unmortgage_cost:
                     mask[59 + prop_idx] = 1  # unmortgage
+        
+        # Trade actions: sell property to opponent for fixed price
+        # Only available for unimproved, unmortgaged properties
+        for prop_idx in player.properties_owned:
+            prop = self.state.properties[prop_idx]
+            if not prop.mortgaged and prop.houses_count == 0:
+                price = compute_trade_price(self.property_specs, prop_idx)
+                # Check each opponent
+                for opponent_id in range(self.num_players):
+                    if opponent_id == self.agent_player_id:
+                        continue
+                    opponent = self.state.players[opponent_id]
+                    if opponent.status == PlayerStatus.ACTIVE and opponent.cash >= price:
+                        # Compute action index for this trade
+                        action_idx = encode_trade_action(
+                            prop_idx, opponent_id, 
+                            self.agent_player_id, self.num_players
+                        )
+                        if action_idx < self.n_actions:
+                            mask[action_idx] = 1
         
         # End turn (always legal after rolling and resolving buy decision)
         mask[89] = 1
@@ -556,8 +772,10 @@ class MonopolyEnv(gym.Env):
         """Get additional info dict."""
         agent_player = self.state.players[self.agent_player_id]
         
-        # Compute net worths for info
-        net_worths = {i: self._compute_net_worth(i) for i in range(self.num_players)}
+        # Use cached net worths
+        if self._net_worth_cache is None:
+            self._refresh_net_worth_cache()
+        net_worths = {i: float(self._net_worth_cache[i]) for i in range(self.num_players)}
         
         return {
             'turn_number': self.state.turn_number,
@@ -587,7 +805,7 @@ class MonopolyEnv(gym.Env):
             for i, player in enumerate(self.state.players):
                 marker = "🤖" if i == self.agent_player_id else "🎮"
                 status = "💀" if player.status == PlayerStatus.BANKRUPT else "✓"
-                nw = self._compute_net_worth(i)
+                nw = self._get_cached_net_worth(i)
                 print(f"{marker} Player {i}: ${player.cash} | NW: ${nw:.0f} | Pos: {player.position} | "
                       f"Props: {len(player.properties_owned)} | Jail: {player.jail_turns} | {status}")
             print(f"{'='*60}\n")

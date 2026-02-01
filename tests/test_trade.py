@@ -1,96 +1,166 @@
+"""
+Minimal Trade System Tests.
+
+Tests for trading mechanics that affect net worth, which impacts H1 reward signal.
+"""
+
 import pytest
-from ..Monopoly.trade import TradeProposal, TradeManager
-from ..Monopoly.state import GameState, PlayerState, PropertyState
+from Monopoly.trade import SimpleTrade, compute_trade_price, decode_trade_action, encode_trade_action
+from Monopoly.state import GameState, PlayerState, PropertyState, PlayerStatus
+from Monopoly.property import load_property_specs
+
 
 @pytest.fixture
-def sample_state():
+def property_specs():
+    return load_property_specs()
+
+
+@pytest.fixture
+def two_player_state():
+    """Minimal game state for trade testing."""
     players = [
-        PlayerState(id=0, cash=500, position=0, properties_owned={1, 2}, houses_on_property={}, mortgaged_properties=set(), jail_turns=0, get_out_of_jail_cards=1),
-        PlayerState(id=1, cash=300, position=0, properties_owned={3}, houses_on_property={}, mortgaged_properties=set(), jail_turns=0, get_out_of_jail_cards=0)
+        PlayerState(
+            id=0, cash=1000, position=0,
+            properties_owned={1},  # Owns Mediterranean (idx 1)
+            houses_on_property={},
+            mortgaged_properties=set(),
+            jail_turns=0, get_out_of_jail_cards=0,
+            status=PlayerStatus.ACTIVE
+        ),
+        PlayerState(
+            id=1, cash=500, position=10,
+            properties_owned=set(),
+            houses_on_property={},
+            mortgaged_properties=set(),
+            jail_turns=0, get_out_of_jail_cards=0,
+            status=PlayerStatus.ACTIVE
+        ),
     ]
-    properties = [PropertyState(owner=None) for _ in range(4)]
+    properties = [PropertyState(owner=None, houses_count=0, mortgaged=False) for _ in range(28)]
     properties[1].owner = 0
-    properties[2].owner = 0
-    properties[3].owner = 1
-    return GameState(players=players, properties=properties, chance_deck=None, community_deck=None)
-
-def test_trade_proposal_validation_valid(sample_state):
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 100, 'properties': [1], 'jail_cards': 0},
-        ask={'cash': 50, 'properties': [3], 'jail_cards': 0}
+    
+    return GameState(
+        players=players,
+        properties=properties,
+        chance_deck=None, community_deck=None,
+        bank_houses_left=32, bank_hotels_left=12,
+        current_player=0, last_roll=None, doubles_count=0,
+        turn_number=0, seed=42, has_rolled=True,
+        awaiting_buy_decision=False, pending_rent=0, rent_creditor=None
     )
-    assert proposal.validate(sample_state) == True
 
-def test_trade_proposal_validation_invalid_insufficient_cash(sample_state):
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 600, 'properties': [], 'jail_cards': 0},  # More than proposer has
-        ask={'cash': 0, 'properties': [], 'jail_cards': 0}
-    )
-    assert proposal.validate(sample_state) == False
 
-def test_trade_proposal_validation_invalid_property_not_owned(sample_state):
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 0, 'properties': [3], 'jail_cards': 0},  # Property owned by receiver
-        ask={'cash': 0, 'properties': [], 'jail_cards': 0}
-    )
-    assert proposal.validate(sample_state) == False
+# =============================================================================
+# TRADE VALIDATION (Research invariant: trades must preserve game integrity)
+# =============================================================================
 
-def test_trade_proposal_execution(sample_state):
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 100, 'properties': [1], 'jail_cards': 1},
-        ask={'cash': 50, 'properties': [3], 'jail_cards': 0}
-    )
-    new_state = proposal.execute(sample_state)
-    assert new_state.players[0].cash == 450  # 500 - 100 + 50
-    assert new_state.players[1].cash == 350  # 300 + 100 - 50
-    assert 1 not in new_state.players[0].properties_owned
-    assert 3 in new_state.players[0].properties_owned
-    assert 1 in new_state.players[1].properties_owned
-    assert 3 not in new_state.players[1].properties_owned
-    assert new_state.players[0].get_out_of_jail_cards == 0
-    assert new_state.players[1].get_out_of_jail_cards == 1
+class TestTradeValidation:
+    """Test that invalid trades are rejected."""
 
-def test_trade_manager_propose_valid(sample_state):
-    manager = TradeManager()
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 100, 'properties': [1], 'jail_cards': 0},
-        ask={'cash': 50, 'properties': [3], 'jail_cards': 0}
-    )
-    result = manager.propose_trade(sample_state, proposal)
-    assert result['valid'] == True
+    def test_valid_trade_passes(self, two_player_state, property_specs):
+        """A valid trade should pass validation."""
+        price = compute_trade_price(property_specs, 1)
+        trade = SimpleTrade(seller_id=0, buyer_id=1, property_idx=1, price=price)
+        assert trade.validate(two_player_state)
 
-def test_trade_manager_propose_invalid(sample_state):
-    manager = TradeManager()
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 600, 'properties': [], 'jail_cards': 0},
-        ask={'cash': 0, 'properties': [], 'jail_cards': 0}
-    )
-    result = manager.propose_trade(sample_state, proposal)
-    assert result['valid'] == False
+    def test_buyer_cannot_afford(self, two_player_state, property_specs):
+        """Trade fails if buyer lacks funds."""
+        # Price is 1.5 * mortgage = 1.5 * 30 = 45; buyer has 500
+        # Force unaffordable
+        two_player_state.players[1].cash = 10
+        price = compute_trade_price(property_specs, 1)
+        trade = SimpleTrade(seller_id=0, buyer_id=1, property_idx=1, price=price)
+        assert not trade.validate(two_player_state)
 
-def test_trade_manager_accept_trade(sample_state):
-    manager = TradeManager()
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 100, 'properties': [1], 'jail_cards': 0},
-        ask={'cash': 50, 'properties': [3], 'jail_cards': 0}
-    )
-    new_state = manager.accept_trade(sample_state, proposal)
-    assert new_state.players[0].cash == 450
-    assert new_state.players[1].cash == 350
+    def test_seller_does_not_own(self, two_player_state, property_specs):
+        """Trade fails if seller doesn't own property."""
+        price = compute_trade_price(property_specs, 5)  # Not owned by player 0
+        trade = SimpleTrade(seller_id=0, buyer_id=1, property_idx=5, price=price)
+        assert not trade.validate(two_player_state)
 
-def test_trade_manager_decline_trade(sample_state):
-    manager = TradeManager()
-    proposal = TradeProposal(
-        proposer=0, receiver=1,
-        offer={'cash': 100, 'properties': [], 'jail_cards': 0},
-        ask={'cash': 0, 'properties': [], 'jail_cards': 0}
-    )
-    new_state = manager.decline_trade(sample_state, proposal)
-    assert new_state == sample_state  # No change
+    def test_mortgaged_property(self, two_player_state, property_specs):
+        """Trade fails if property is mortgaged."""
+        two_player_state.properties[1].mortgaged = True
+        price = compute_trade_price(property_specs, 1)
+        trade = SimpleTrade(seller_id=0, buyer_id=1, property_idx=1, price=price)
+        assert not trade.validate(two_player_state)
+
+    def test_improved_property(self, two_player_state, property_specs):
+        """Trade fails if property has houses."""
+        two_player_state.properties[1].houses_count = 1
+        price = compute_trade_price(property_specs, 1)
+        trade = SimpleTrade(seller_id=0, buyer_id=1, property_idx=1, price=price)
+        assert not trade.validate(two_player_state)
+
+
+# =============================================================================
+# TRADE EXECUTION (Research invariant: net worth conservation)
+# =============================================================================
+
+class TestTradeExecution:
+    """Test that trade execution correctly transfers assets."""
+
+    def test_property_and_cash_transfer(self, two_player_state, property_specs):
+        """Trade correctly transfers property and cash."""
+        price = compute_trade_price(property_specs, 1)
+        initial_seller_cash = two_player_state.players[0].cash
+        initial_buyer_cash = two_player_state.players[1].cash
+        
+        trade = SimpleTrade(seller_id=0, buyer_id=1, property_idx=1, price=price)
+        new_state = trade.execute(two_player_state)
+        
+        # Property transferred
+        assert 1 not in new_state.players[0].properties_owned
+        assert 1 in new_state.players[1].properties_owned
+        assert new_state.properties[1].owner == 1
+        
+        # Cash transferred
+        assert new_state.players[0].cash == initial_seller_cash + price
+        assert new_state.players[1].cash == initial_buyer_cash - price
+
+
+# =============================================================================
+# ACTION ENCODING (Research invariant: bijective encoding)
+# =============================================================================
+
+class TestActionEncoding:
+    """Test that action encoding is a bijection."""
+
+    def test_encode_decode_roundtrip(self):
+        """Encoding and decoding are inverse operations."""
+        num_players = 4
+        agent_id = 0
+        
+        for prop_idx in range(28):
+            for buyer_id in range(1, num_players):  # Skip agent
+                action = encode_trade_action(prop_idx, buyer_id, agent_id, num_players)
+                decoded = decode_trade_action(action, agent_id, num_players)
+                
+                assert decoded is not None
+                assert decoded[0] == prop_idx
+                assert decoded[1] == buyer_id
+
+    def test_action_range(self):
+        """Trade actions occupy [90, 173]."""
+        # First trade action
+        action = encode_trade_action(0, 1, 0, 4)
+        assert action == 90
+        
+        # Last trade action (property 27, buyer 3)
+        action = encode_trade_action(27, 3, 0, 4)
+        assert action == 173
+
+
+# =============================================================================
+# PRICING (Research invariant: deterministic pricing)
+# =============================================================================
+
+class TestTradePricing:
+    """Test pricing formula consistency."""
+
+    def test_price_is_1_5x_mortgage(self, property_specs):
+        """Price = 1.5 × mortgage_value."""
+        for i, spec in enumerate(property_specs):
+            expected = int(spec.mortgage_value * 1.5)
+            actual = compute_trade_price(property_specs, i)
+            assert actual == expected, f"Property {i}: expected {expected}, got {actual}"

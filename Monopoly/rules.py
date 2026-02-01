@@ -2,13 +2,13 @@ from typing import List, Dict, Tuple, Any
 import numpy as np
 from enum import Enum
 from .state import GameState
-from .trade import TradeProposal
 import random
 from typing import Optional, Tuple, List
 from .state import GameState, PlayerState, PlayerStatus, PropertyState, DeckState
 from .board import Board, TileKind
 from .property import load_property_specs, PropertySpec
 from .cards import load_chance_cards, load_community_cards, Card
+from .trade import SimpleTrade, compute_trade_price
 
 class ActionType(Enum):
     ROLL = 'ROLL'
@@ -18,9 +18,7 @@ class ActionType(Enum):
     BUILD = 'BUILD'
     MORTGAGE = 'MORTGAGE'
     UNMORTGAGE = 'UNMORTGAGE'
-    PROPOSE_TRADE = 'PROPOSE_TRADE'
-    ACCEPT_TRADE = 'ACCEPT_TRADE'
-    DECLINE_TRADE = 'DECLINE_TRADE'
+    TRADE = 'TRADE'  # Simplified: sell property to opponent for cash
     USE_GET_OUT = 'USE_GET_OUT'
     PAY_FINE = 'PAY_FINE'
     END_TURN = 'END_TURN'
@@ -135,6 +133,25 @@ class RulesEngine:
                         'cost': unmortgage_cost
                     })
         
+        # Trade actions: sell property to opponent for fixed price
+        # Only available for unimproved, unmortgaged properties
+        for prop_idx in player.properties_owned:
+            prop = state.properties[prop_idx]
+            if not prop.mortgaged and prop.houses_count == 0:
+                price = compute_trade_price(self.property_specs, prop_idx)
+                # Check each opponent
+                for opponent_id in range(len(state.players)):
+                    if opponent_id == player_id:
+                        continue
+                    opponent = state.players[opponent_id]
+                    if opponent.status == PlayerStatus.ACTIVE and opponent.cash >= price:
+                        actions.append({
+                            'type': 'trade',
+                            'property_idx': prop_idx,
+                            'buyer_id': opponent_id,
+                            'price': price
+                        })
+        
         # End turn action (always available after rolling)
         actions.append({'type': 'end_turn'})
         
@@ -200,7 +217,6 @@ class RulesEngine:
         elif action_type == 'buy':
             prop_idx = action.get('property_idx')
             if self.buy_property(state, player_id, prop_idx):
-                reward = 10  # Small reward for buying
                 state.awaiting_buy_decision = False
             log = f"Player {player_id} bought property {prop_idx}"
             
@@ -258,7 +274,6 @@ class RulesEngine:
                         state.bank_hotels_left -= 1
                     else:
                         state.bank_houses_left -= 1
-                    reward = 5  # Small reward for building
                     log = f"Player {player_id} built house on property {prop_idx}"
                     
         elif action_type == 'mortgage':
@@ -284,14 +299,30 @@ class RulesEngine:
                     player.mortgaged_properties.discard(prop_idx)
                     log = f"Player {player_id} unmortgaged property {prop_idx} for ${unmortgage_cost}"
         
-        # Check for game end
+        elif action_type == 'trade':
+            # Execute a simplified trade: sell property to opponent for cash
+            prop_idx = action.get('property_idx')
+            buyer_id = action.get('buyer_id')
+            price = action.get('price')
+            
+            if prop_idx is not None and buyer_id is not None and price is not None:
+                trade = SimpleTrade(
+                    seller_id=player_id,
+                    buyer_id=buyer_id,
+                    property_idx=prop_idx,
+                    price=price
+                )
+                if trade.validate(state):
+                    state = trade.execute(state)
+                    self._update_monopoly_status(state, prop_idx)
+                    log = f"Player {player_id} sold property {prop_idx} to player {buyer_id} for ${price}"
+                else:
+                    log = f"Player {player_id} attempted invalid trade"
+        
+        # Check for game end (reward computed by environment, not here)
         active_players = [p for p in state.players if p.status == PlayerStatus.ACTIVE]
         if len(active_players) <= 1:
             done = True
-            if active_players and active_players[0].id == player_id:
-                reward += 100
-            else:
-                reward -= 100
         
         return state, reward, done, log
 

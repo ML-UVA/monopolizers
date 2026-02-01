@@ -1,3 +1,13 @@
+"""Auction logic for Monopoly properties.
+
+NOTE: This module is NOT integrated into the Gym action space.
+The current research focus (H1) examines reward shaping only.
+When a player declines to buy a property, the property simply remains unowned
+(official rules would auction it; this is a simplification).
+
+This module provides auction mechanics that could be integrated in future work.
+"""
+
 from typing import Optional, List
 from .state import GameState, PlayerState
 from .property import load_property_specs, PropertySpec

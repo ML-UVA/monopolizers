@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 from typing import Optional, Dict, Any, Tuple
 
+
 class MonopolyFlattenWrapper(gym.ObservationWrapper):
     """
     Flattens the dictionary observation into a single vector for dense layers.
@@ -34,7 +35,7 @@ class MonopolyFlattenWrapper(gym.ObservationWrapper):
         # last_roll: 2
         # bank_houses: 1
         # bank_hotels: 1
-        # net_worth: n_players (NEW)
+        # net_worth: n_players
         
         flat_dim = (
             1 + 
@@ -72,7 +73,6 @@ class MonopolyFlattenWrapper(gym.ObservationWrapper):
         flat_list.append(obs['positions'].flatten() / 39.0)
         
         # property_owner: encode as -1 (unowned), or player_id normalized
-        # We'll keep it simple: -1 for unowned, else player_id / (n_players - 1)
         prop_owner = obs['property_owner'].flatten().astype(np.float32)
         prop_owner[prop_owner >= 0] = prop_owner[prop_owner >= 0] / max(self.n_players - 1, 1)
         flat_list.append(prop_owner)
@@ -136,49 +136,10 @@ class ActionMaskWrapper(gym.Wrapper):
         return self.env.reset(**kwargs)
 
 
-class RewardShapingWrapper(gym.Wrapper):
-    """
-    Wrapper that applies additional reward shaping to help with learning.
-    """
-    def __init__(self, env, 
-                 cash_weight: float = 0.001,
-                 property_weight: float = 0.5,
-                 survival_bonus: float = 0.01):
-        super().__init__(env)
-        self.cash_weight = cash_weight
-        self.property_weight = property_weight
-        self.survival_bonus = survival_bonus
-        self._prev_cash = 0
-        self._prev_properties = 0
-        
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        agent_id = self.env.unwrapped.agent_player_id
-        self._prev_cash = self.env.unwrapped.state.players[agent_id].cash
-        self._prev_properties = len(self.env.unwrapped.state.players[agent_id].properties_owned)
-        return obs, info
-    
-    def step(self, action: int):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        
-        agent_id = self.env.unwrapped.agent_player_id
-        state = self.env.unwrapped.state
-        
-        # Cash change reward
-        current_cash = state.players[agent_id].cash
-        cash_delta = current_cash - self._prev_cash
-        reward += cash_delta * self.cash_weight
-        
-        # Property acquisition reward
-        current_properties = len(state.players[agent_id].properties_owned)
-        prop_delta = current_properties - self._prev_properties
-        reward += prop_delta * self.property_weight
-        
-        # Small survival bonus
-        if not terminated:
-            reward += self.survival_bonus
-        
-        self._prev_cash = current_cash
-        self._prev_properties = current_properties
-        
-        return obs, reward, terminated, truncated, info
+# NOTE: RewardShapingWrapper has been REMOVED.
+# 
+# All reward logic for the H1 ablation study is handled directly in MonopolyEnv
+# via the `reward_mode` parameter. Using a separate wrapper would create 
+# confounders and experimental ambiguity.
+#
+# If you need the old RewardShapingWrapper for other purposes, see git history.

@@ -399,7 +399,7 @@ class DDQNHybridTrainer:
     def train(
         self,
         total_timesteps: int,
-        eval_interval: int = 10000,
+        eval_interval: int = 100000,
         eval_episodes: int = 100,
         log_interval: int = 1000,
         save_interval: int = 50000,
@@ -428,6 +428,9 @@ class DDQNHybridTrainer:
         print(f"Action dim: {self.action_dim}")
         print(f"Config: {self.config}")
         print("=" * 60)
+
+        # Cap evaluation episodes to avoid excessive evaluation time
+        eval_episodes = min(eval_episodes, 50)
         
         start_time = time.time()
         

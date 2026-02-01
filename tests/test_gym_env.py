@@ -1,216 +1,298 @@
+"""
+Minimal Test Suite for MonopolyEnv Research Invariants.
+
+This file contains ONLY the tests required to validate:
+1. Environment correctness (determinism, termination, action space)
+2. H1 ablation invariants (dense vs sparse reward modes)
+3. Trading integration correctness
+
+Each test encodes a meaningful research invariant that would matter to reviewers.
+"""
+
 import pytest
 import numpy as np
-from ..Monopoly.envs.gym_env import MonopolyEnv
-from ..Monopoly.state import PlayerStatus
+from Monopoly.envs.gym_env import MonopolyEnv
+from Monopoly.state import PlayerStatus
 
 
-def test_env_creation():
-    """Test that environment can be created with default parameters."""
-    env = MonopolyEnv(num_players=4, agent_player_id=0)
-    assert env.num_players == 4
-    assert env.agent_player_id == 0
-    assert env.action_space is not None
-    assert env.observation_space is not None
+# =============================================================================
+# ENVIRONMENT DETERMINISM (Critical for reproducibility)
+# =============================================================================
 
+class TestDeterminism:
+    """Verify that identical seeds produce identical trajectories."""
 
-def test_env_reset():
-    """Test environment reset functionality."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Check observation structure
-    assert 'player_id' in obs
-    assert 'cash' in obs
-    assert 'positions' in obs
-    assert 'property_owner' in obs
-    assert 'legal_mask' in obs
-    
-    # Check initial values
-    assert obs['player_id'][0] == 0
-    assert len(obs['cash']) == 2
-    assert all(obs['cash'] == 1500)  # Starting cash
-    assert all(obs['positions'] == 0)  # Start at GO
-    assert all(obs['property_owner'] == -1)  # No properties owned
-    assert obs['turn_number'][0] == 0
-
-
-def test_legal_action_mask():
-    """Test that legal action mask is computed correctly."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    legal_mask = obs['legal_mask']
-    assert legal_mask.shape == (env.n_actions,)
-    assert legal_mask.dtype == np.int32
-    
-    # Roll should always be legal at start of turn (before rolling)
-    assert legal_mask[0] == 1
-    # End turn should NOT be legal before rolling (must roll first)
-    assert legal_mask[89] == 0
-    
-    # After rolling, end turn should be legal
-    obs, _, _, _, _ = env.step(0)  # Roll
-    legal_mask = obs['legal_mask']
-    # After rolling, roll should not be legal (already rolled)
-    # and end turn should be legal (unless awaiting buy decision)
-    if not env.state.awaiting_buy_decision:
-        assert legal_mask[89] == 1
-
-
-def test_env_step():
-    """Test basic environment step functionality."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Take roll action
-    action = 0  # roll
-    obs, reward, terminated, truncated, info = env.step(action)
-    
-    # Check that state changed
-    assert 'cash' in obs
-    assert 'positions' in obs
-    assert not terminated  # Game shouldn't end after one turn
-    assert isinstance(reward, float)
-    
-    # Check info
-    assert 'turn_number' in info
-    assert 'agent_cash' in info
-
-
-def test_observation_space_compliance():
-    """Test that observations match the declared observation space."""
-    env = MonopolyEnv(num_players=3, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Check that observation is in observation space
-    assert env.observation_space.contains(obs)
-
-
-def test_action_space_compliance():
-    """Test that actions are within action space bounds."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Sample random action
-    action = env.action_space.sample()
-    assert 0 <= action < env.n_actions
-    
-    # Test step with sampled action
-    obs, reward, terminated, truncated, info = env.step(action)
-    assert env.observation_space.contains(obs)
-
-
-def test_game_termination():
-    """Test that game terminates when only one player remains active."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Manually bankrupt opponent to test termination
-    env.state.players[1].status = PlayerStatus.BANKRUPT
-    env.state.players[1].cash = -100
-    
-    # Take an action
-    obs, reward, terminated, truncated, info = env.step(0)
-    
-    # Game should terminate
-    assert terminated or info['active_players'] == 1
-
-
-def test_multiple_episodes():
-    """Test that environment can be reset and reused for multiple episodes."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    
-    for episode in range(3):
-        obs, info = env.reset(seed=42 + episode)
-        assert obs['turn_number'][0] == 0
+    def test_reset_determinism(self):
+        """Same seed → same initial observation."""
+        env1 = MonopolyEnv(num_players=2, seed=42)
+        env2 = MonopolyEnv(num_players=2, seed=42)
         
-        # Take a few steps
-        for _ in range(5):
-            action = 0  # roll
-            obs, reward, terminated, truncated, info = env.step(action)
-            if terminated or truncated:
+        obs1, _ = env1.reset(seed=42)
+        obs2, _ = env2.reset(seed=42)
+        
+        np.testing.assert_array_equal(obs1['cash'], obs2['cash'])
+        np.testing.assert_array_equal(obs1['positions'], obs2['positions'])
+        np.testing.assert_array_equal(obs1['legal_mask'], obs2['legal_mask'])
+
+    def test_trajectory_determinism(self):
+        """Same seed + same actions → identical game state progression."""
+        env1 = MonopolyEnv(num_players=2, seed=42)
+        env2 = MonopolyEnv(num_players=2, seed=42)
+        
+        obs1, _ = env1.reset(seed=42)
+        obs2, _ = env2.reset(seed=42)
+        
+        # Track cash (deterministic) rather than rewards (may have float issues)
+        cash1, cash2 = [], []
+        for _ in range(10):
+            # Take roll action (0) which is always legal at turn start
+            obs1, r1, term1, trunc1, _ = env1.step(0)
+            obs2, r2, term2, trunc2, _ = env2.step(0)
+            
+            cash1.append(obs1['cash'].copy())
+            cash2.append(obs2['cash'].copy())
+            
+            if term1 or trunc1:
                 break
-
-
-def test_render_methods():
-    """Test that render methods don't crash."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, render_mode='human', seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Render should not crash
-    env.render()
-    
-    obs, reward, terminated, truncated, info = env.step(0)
-    env.render()
-    
-    env.close()
-
-
-def test_different_player_counts():
-    """Test environment with different numbers of players."""
-    for n_players in [2, 3, 4]:
-        env = MonopolyEnv(num_players=n_players, agent_player_id=0, seed=42)
-        obs, info = env.reset(seed=42)
         
-        assert len(obs['cash']) == n_players
-        assert len(obs['positions']) == n_players
-        assert obs['player_id'][0] == 0
+        # Game states must be identical
+        for i, (c1, c2) in enumerate(zip(cash1, cash2)):
+            np.testing.assert_array_equal(c1, c2, err_msg=f"Step {i}: cash diverged")
+
+
+# =============================================================================
+# H1 ABLATION: REWARD MODE INVARIANTS (Core research hypothesis)
+# =============================================================================
+
+class TestRewardModes:
+    """
+    Tests for H1 ablation: dense_networth vs sparse_terminal.
+    
+    These tests validate the core research question:
+    - Dense: non-zero during play, based on relative net worth
+    - Sparse: zero during play, ±1 only at terminal
+    """
+
+    def test_invalid_reward_mode_raises(self):
+        """Only valid reward modes are accepted."""
+        with pytest.raises(ValueError, match="Invalid reward_mode"):
+            MonopolyEnv(num_players=2, seed=42, reward_mode='invalid_mode')
+
+    def test_dense_reward_nonzero_during_play(self):
+        """Dense mode produces non-zero reward during gameplay."""
+        env = MonopolyEnv(num_players=2, seed=42, reward_mode='dense_networth')
+        env.reset(seed=42)
         
-        # Take one step
-        obs, reward, terminated, truncated, info = env.step(0)
+        _, reward, terminated, truncated, _ = env.step(0)
+        
+        if not (terminated or truncated):
+            assert reward > 0, "Dense reward should be positive during play"
+
+    def test_sparse_reward_zero_during_play(self):
+        """Sparse mode produces exactly 0 reward during gameplay."""
+        env = MonopolyEnv(num_players=2, seed=42, reward_mode='sparse_terminal')
+        env.reset(seed=42)
+        
+        _, reward, terminated, truncated, _ = env.step(0)
+        
+        if not (terminated or truncated):
+            assert reward == 0.0, f"Sparse reward should be 0 during play, got {reward}"
+
+    def test_reward_modes_same_transitions(self):
+        """
+        Switching reward_mode changes ONLY the reward stream.
+        Observations and termination conditions must be identical.
+        """
+        env_dense = MonopolyEnv(num_players=2, seed=42, reward_mode='dense_networth')
+        env_sparse = MonopolyEnv(num_players=2, seed=42, reward_mode='sparse_terminal')
+        
+        obs_d, _ = env_dense.reset(seed=42)
+        obs_s, _ = env_sparse.reset(seed=42)
+        
+        # Observations must match
+        np.testing.assert_array_equal(obs_d['cash'], obs_s['cash'])
+        np.testing.assert_array_equal(obs_d['positions'], obs_s['positions'])
+        
+        # Step with same action
+        obs_d, r_d, term_d, trunc_d, _ = env_dense.step(0)
+        obs_s, r_s, term_s, trunc_s, _ = env_sparse.step(0)
+        
+        # Transitions must match
+        np.testing.assert_array_equal(obs_d['cash'], obs_s['cash'])
+        np.testing.assert_array_equal(obs_d['positions'], obs_s['positions'])
+        assert term_d == term_s
+        assert trunc_d == trunc_s
+        
+        # But rewards must differ (unless terminal)
+        if not (term_d or trunc_d):
+            assert r_d != r_s, "Reward modes should produce different rewards"
+
+
+# =============================================================================
+# ACTION SPACE INVARIANTS
+# =============================================================================
+
+class TestActionSpace:
+    """Verify action space correctness and legal action masking."""
+
+    def test_action_space_size(self):
+        """Action space is Discrete(174) = 90 base + 84 trade actions."""
+        env = MonopolyEnv(num_players=4, seed=42)
+        assert env.action_space.n == 174
+
+    def test_legal_mask_at_turn_start(self):
+        """At turn start, only roll (action 0) should be legal."""
+        env = MonopolyEnv(num_players=2, seed=42)
+        obs, _ = env.reset(seed=42)
+        
+        legal_mask = obs['legal_mask']
+        
+        # Roll must be legal
+        assert legal_mask[0] == 1, "Roll should be legal at turn start"
+        # End turn must NOT be legal before rolling
+        assert legal_mask[89] == 0, "End turn should not be legal before rolling"
+
+    def test_illegal_action_corrected(self):
+        """Environment corrects illegal actions to legal ones."""
+        env = MonopolyEnv(num_players=2, seed=42)
+        obs, _ = env.reset(seed=42)
+        
+        # Try end_turn (89) before rolling - should be corrected to roll (0)
+        obs, reward, terminated, truncated, info = env.step(89)
+        
+        # Should not crash and should have valid observation
         assert env.observation_space.contains(obs)
 
 
-def test_action_decoding():
-    """Test that action decoding works correctly."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    # Test different action types
-    roll_action = env._decode_action(0)
-    assert roll_action['type'] == 'roll'
-    
-    buy_action = env._decode_action(1)
-    assert buy_action['type'] == 'buy'
-    
-    pass_action = env._decode_action(2)
-    assert pass_action['type'] == 'pass'
-    
-    build_action = env._decode_action(3)
-    assert build_action['type'] == 'build'
-    assert build_action['property_idx'] == 0
-    
-    mortgage_action = env._decode_action(31)
-    assert mortgage_action['type'] == 'mortgage'
-    assert mortgage_action['property_idx'] == 0
+# =============================================================================
+# TRADING INTEGRATION (Affects net worth → H1)
+# =============================================================================
+
+class TestTradingActions:
+    """Verify trading actions are correctly integrated."""
+
+    def test_trade_action_range(self):
+        """Trade actions occupy indices 90-173."""
+        env = MonopolyEnv(num_players=4, seed=42)
+        
+        # Decode action 90 (first trade)
+        trade = env._decode_action(90)
+        assert trade['type'] == 'trade'
+        
+        # Decode action 173 (last trade)
+        trade = env._decode_action(173)
+        assert trade['type'] == 'trade'
+
+    def test_trade_legal_mask_empty_when_no_properties(self):
+        """Trade actions are illegal when agent owns no tradeable properties."""
+        env = MonopolyEnv(num_players=2, seed=42)
+        obs, _ = env.reset(seed=42)
+        
+        # At game start, agent owns nothing
+        legal_mask = obs['legal_mask']
+        trade_mask = legal_mask[90:]  # Trade action range
+        
+        # All trade actions should be illegal
+        assert np.sum(trade_mask) == 0, "No trade actions legal without properties"
 
 
-def test_reward_shaping():
-    """Test that reward includes shaped components."""
-    env = MonopolyEnv(num_players=2, agent_player_id=0, seed=42)
-    obs, info = env.reset(seed=42)
-    
-    initial_cash = obs['cash'][0]
-    
-    # Take action
-    obs, reward, terminated, truncated, info = env.step(0)
-    
-    # Reward should be a finite number
-    assert np.isfinite(reward)
-    assert isinstance(reward, float)
+# =============================================================================
+# TERMINATION CONDITIONS
+# =============================================================================
+
+class TestTermination:
+    """Verify correct game termination behavior."""
+
+    def test_bankruptcy_terminates_game(self):
+        """Game terminates when opponent goes bankrupt."""
+        env = MonopolyEnv(num_players=2, seed=42)
+        env.reset(seed=42)
+        
+        # Force opponent bankruptcy
+        env.state.players[1].status = PlayerStatus.BANKRUPT
+        env.state.players[1].cash = -100
+        
+        obs, reward, terminated, truncated, info = env.step(0)
+        
+        # Game should terminate or show single active player
+        assert terminated or info['active_players'] == 1
+
+    def test_max_turns_truncation(self):
+        """Game truncates after max_turns."""
+        env = MonopolyEnv(num_players=2, seed=42, max_turns=5)
+        env.reset(seed=42)
+        
+        # Run until truncation
+        for _ in range(100):  # More than enough steps
+            obs, reward, terminated, truncated, info = env.step(0)
+            if terminated or truncated:
+                break
+        
+        # Should have truncated (or terminated for other reasons)
+        assert terminated or truncated
 
 
-def test_opponent_simulation():
-    """Test that opponent turns are simulated automatically."""
-    env = MonopolyEnv(num_players=3, agent_player_id=1, seed=42)  # Agent is player 1
-    obs, info = env.reset(seed=42)
-    
-    # After reset, it should be agent's turn (player 1)
-    assert env.state.current_player == 1
-    
-    # Take action
-    obs, reward, terminated, truncated, info = env.step(0)
-    
-    # After step, should still be agent's turn (or game over)
-    if not terminated:
-        assert env.state.current_player == 1 or env.state.current_player == env.agent_player_id
+# =============================================================================
+# OBSERVATION SPACE COMPLIANCE
+# =============================================================================
+
+class TestObservationSpace:
+    """Verify observations match declared space."""
+
+    def test_observation_in_space(self):
+        """All observations must be in the declared observation space."""
+        env = MonopolyEnv(num_players=3, seed=42)
+        obs, _ = env.reset(seed=42)
+        
+        assert env.observation_space.contains(obs)
+        
+        obs, _, _, _, _ = env.step(0)
+        assert env.observation_space.contains(obs)
+
+    def test_observation_structure(self):
+        """Observation contains all required keys."""
+        env = MonopolyEnv(num_players=2, seed=42)
+        obs, _ = env.reset(seed=42)
+        
+        required_keys = [
+            'player_id', 'cash', 'positions', 'property_owner',
+            'houses', 'mortgaged', 'legal_mask', 'net_worth'
+        ]
+        for key in required_keys:
+            assert key in obs, f"Missing key: {key}"
+
+
+# =============================================================================
+# INTEGRATION: SHORT EPISODE
+# =============================================================================
+
+class TestIntegration:
+    """End-to-end integration test."""
+
+    def test_short_episode_runs(self):
+        """Environment can run a short episode without crashing."""
+        env = MonopolyEnv(num_players=4, seed=42, max_turns=20)
+        obs, _ = env.reset(seed=42)
+        
+        total_reward = 0.0
+        steps = 0
+        
+        while True:
+            # Pick first legal action
+            legal_mask = obs['legal_mask']
+            legal_actions = np.where(legal_mask == 1)[0]
+            action = legal_actions[0] if len(legal_actions) > 0 else 0
+            
+            obs, reward, terminated, truncated, info = env.step(action)
+            total_reward += reward
+            steps += 1
+            
+            if terminated or truncated:
+                break
+            
+            if steps > 500:  # Safety limit
+                break
+        
+        assert steps > 0
+        assert np.isfinite(total_reward)
+

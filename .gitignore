@@ -253,3 +253,19 @@ evaluations/
 
 # CSV metrics files (regenerate from training)
 # *.csv  # Uncomment if you don't want to commit any CSV files
+
+# ============================================================================
+# Personal notes / local scratch (not for repo)
+# ============================================================================
+notes/
+personal/
+scratch/
+*.scratch
+*_notes.txt
+*_personal.txt
+*_private.txt
+*.local.txt
+*.local.md
+
+# Detailed guide (presentation notes)
+DQN_DDQN_CODEBASE_GUIDE.txt
