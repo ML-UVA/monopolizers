@@ -228,28 +228,36 @@ __marimo__/
 # Training runs directory (models, logs, metrics)
 runs/
 
-# Model files
-models/
+# Training outputs/logs
+logs/
+tensorboard/
+results/
+evaluations/
+checkpoints/
+wandb/
+mlruns/
+
+# Model / checkpoint artifacts
 *.pt
 *.pth
+*.ckpt
 *.zip
+*.onnx
+*.h5
+*.hdf5
+*.tflite
+*.joblib
 *.pkl
 
-# Replay buffers (can be very large)
+# Replay buffers / large arrays
 buffers/
 *.buffer
 *_buffer.pkl
+*.npz
+*.npy
 
-# TensorBoard logs in logs/ subdirectories
-logs/DQN*/
-logs/DDQN*/
+# TensorBoard event files
 events.out.tfevents.*
-
-# Checkpoints
-checkpoints/
-
-# Evaluation results
-evaluations/
 
 # CSV metrics files (regenerate from training)
 # *.csv  # Uncomment if you don't want to commit any CSV files
