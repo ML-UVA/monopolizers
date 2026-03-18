@@ -1,9 +1,4 @@
-/Monopoly/__pycache__/
-/Monopoly/agents/__pycache__/
-/Monopoly/envs/__pycache__/
-/Monopoly/tests/__pycache__/
-/tests/__pycache__/
-
+.vscode/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

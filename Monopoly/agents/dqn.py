@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -99,7 +101,7 @@ class DQNAgent:
         """Store a transition in the replay buffer"""
         self.buffer.push(obs, action, reward, next_obs, done, next_legal_mask)
 
-    def update(self) -> float | None:
+    def update(self) -> Optional[float]:
         """Sample a batch and perform one gradient update. Returns loss or None."""
         if not self.buffer.is_ready(self.batch_size):
             return None
@@ -140,6 +142,8 @@ class DQNAgent:
 
         if self.steps_done % self.target_update_freq == 0:
             self.target_network.load_state_dict(self.q_network.state_dict())
+        
+        return loss.item()
 
     def save(self, path: str):
         """Save network weights and training state."""

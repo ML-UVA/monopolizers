@@ -321,7 +321,7 @@ class MonopolyEnv(gym.Env):
             new_cash = self.state.players[self.agent_player_id].cash
             new_properties = len(self.state.players[self.agent_player_id].properties_owned)
             reward += (new_cash - old_cash) / 1000.0  # Normalize cash changes
-            reward += (new_properties - old_properties) * 0.5  # Reward property acquisition
+            # reward += (new_properties - old_properties) * 0.5  # Reward property acquisition
             
         except Exception as e:
             # If action fails, give negative reward and end episode
@@ -609,8 +609,6 @@ class MonopolyEnv(gym.Env):
             
             # Agent selects action
             action = agent.select_action(self.state, legal_actions)
-
-            print(f"  Opponent {current_player} step {steps}: {action['type']}, current_player={self.state.current_player}")
 
             # Apply action
             self.state, _, _, _ = self.rules_engine.apply_action(self.state, action, self.engine.rng, engine=self.engine)

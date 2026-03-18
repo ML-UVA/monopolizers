@@ -134,6 +134,9 @@ def load_chance_cards() -> List[Card]:
     def crossword(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         state.players[player_id].cash += 100
         return state, {"collected": 100}
+    
+    def no_op(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        return state, {}
 
     return [
         Card("Advance to GO", "Advance to GO (Collect $200)", advance_to_go),
@@ -225,6 +228,9 @@ def load_community_cards() -> List[Card]:
     def inherit(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
         state.players[player_id].cash += 100
         return state, {"collected": 100}
+    
+    def no_op(state: GameState, engine: GameEngine, rng: np.random.Generator, player_id: int) -> Tuple[GameState, Dict]:
+        return state, {}
 
     return [
         Card("Advance to GO", "Advance to GO (Collect $200)", advance_to_go_comm),

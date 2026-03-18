@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from Monopoly.engine import GameEngine
-from Monopoly.rules import RulesEngine
+from Monopoly.rules import RulesEngine, RulesConfig
 from Monopoly.state import GameState, PlayerState, PropertyState, DeckState, PlayerStatus
 from Monopoly.board import Board
 from Monopoly.property import load_property_specs
@@ -29,7 +29,7 @@ def run_smoke_game(num_players=4, max_turns=50, seed=42):
     property_specs = load_property_specs()
     chance_cards = load_chance_cards()
     community_cards = load_community_cards()
-    rules = RulesEngine(board, property_specs, chance_cards, community_cards)
+    rules = RulesEngine(board, property_specs, chance_cards, community_cards, config=RulesConfig)
     engine = GameEngine(rules, seed=seed)
     
     # Create initial state
@@ -37,7 +37,7 @@ def run_smoke_game(num_players=4, max_turns=50, seed=42):
     for i in range(num_players):
         players.append(PlayerState(
             id=i,
-            cash=1500,
+            cash=rules.config.starting_cash,
             position=0,
             properties_owned=set(),
             houses_on_property={},
@@ -55,14 +55,18 @@ def run_smoke_game(num_players=4, max_turns=50, seed=42):
         properties=properties,
         chance_deck=DeckState(pointer=0, seed=seed),
         community_deck=DeckState(pointer=0, seed=seed + 1),
-        bank_houses_left=32,
-        bank_hotels_left=12,
+        bank_houses_left=rules.config.bank_houses,
+        bank_hotels_left=rules.config.bank_hotels,
         current_player=0,
         last_roll=None,
         doubles_count=0,
         turn_number=0,
         seed=seed
     )
+
+    property_specs = load_property_specs()
+    groups = set(spec.group for spec in property_specs)
+    state.monopoly_status = {group: None for group in groups}
     
     # Run game for max_turns
     turn = 0
