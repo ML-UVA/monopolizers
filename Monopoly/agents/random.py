@@ -2,6 +2,7 @@ import numpy as np
 from typing import List, Dict, Any
 from ..state import GameState
 from .agent import Agent
+from ..rules import ActionType
 
 class RandomAgent(Agent):
     """Agent that selects actions randomly."""
@@ -12,7 +13,7 @@ class RandomAgent(Agent):
 
     def select_action(self, state: GameState, legal_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not legal_actions:
-            return {'type': 'pass'}
+            return {'type': ActionType.PASS.value}
         
         # Randomly choose an action
         # We can just pick a random index

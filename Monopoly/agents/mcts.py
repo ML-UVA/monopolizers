@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional
 from ..state import GameState, PlayerStatus
 from .agent import Agent
+from ..rules import ActionType
 import random
 
 class MCTSAgent(Agent):
@@ -17,7 +18,7 @@ class MCTSAgent(Agent):
 
     def select_action(self, state: GameState, legal_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not legal_actions:
-            return {'type': 'pass'}
+            return {'type': ActionType.PASS.value}
         if len(legal_actions) == 1:
             return legal_actions[0]
 
