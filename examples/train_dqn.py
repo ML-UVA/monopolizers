@@ -131,5 +131,5 @@ if __name__ == '__main__':
         total_episodes=5000,
         training_stage=1,
         save_path='checkpoints/dqn_stage1.pt',
-        log_every=10
+        log_every=100
     )
