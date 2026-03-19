@@ -5,13 +5,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import time
 import numpy as np
 import torch
+import logging
 
 from Monopoly.envs.gym_env import MonopolyEnv
 from Monopoly.envs.wrappers import MonopolyFlattenWrapper
 from Monopoly.agents.random import RandomAgent
 from Monopoly.agents.greedy import GreedyAgent
 from Monopoly.agents.dqn import DQNAgent
-
 
 
 def train(
@@ -24,6 +24,15 @@ def train(
 
     os.makedirs('logs', exist_ok=True)
     os.makedirs('checkpoints', exist_ok=True)
+
+    logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(message)s',
+    handlers=[
+        logging.FileHandler('logs/training.log'),
+        logging.StreamHandler()  # also prints to terminal
+    ]
+)
 
     env = MonopolyFlattenWrapper(MonopolyEnv(
         num_players=4,
@@ -99,7 +108,7 @@ def train(
             avg_reward = np.mean(episode_rewards[-log_every:])
             avg_length = np.mean(episode_lengths[-log_every:])
             avg_loss = np.mean(losses[-100:]) if losses else 0.0
-            print(
+            logging.info(
                 f"Episode {episode + 1}/{total_episodes} | "
                 f"Avg Reward: {avg_reward:.2f} | "
                 f"Avg Length: {avg_length:.0f} | "
@@ -122,5 +131,5 @@ if __name__ == '__main__':
         total_episodes=5000,
         training_stage=1,
         save_path='checkpoints/dqn_stage1.pt',
-        log_every=100
+        log_every=10
     )
