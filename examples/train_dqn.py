@@ -144,7 +144,7 @@ if __name__ == '__main__':
     train(
         total_episodes=10000,
         training_stage=1,
-        save_path='checkpoints/dqn_stage1.pt',
+        save_path='checkpoints/dqn_phase1.pt',
         log_every=100,
         opponent_type='random'
     )
