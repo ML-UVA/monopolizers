@@ -20,7 +20,6 @@ def train(
         save_path: str = 'checkpoints/dqn_stage1.pt',
         load_path: str = None,
         log_every: int = 100,
-        opponent_type: str = 'random'
 ):
 
     os.makedirs('logs', exist_ok=True)
@@ -35,21 +34,13 @@ def train(
     ]
 )
 
-    match (opponent_type):
-        case 'random':
-            opponent_agent = RandomAgent()
-        case 'greedy':
-            opponent_agent = GreedyAgent()
-        case _:
-            opponent_agent = None
-
 
     env = MonopolyFlattenWrapper(MonopolyEnv(
         num_players=4,
-        opponent_policies=[opponent_agent, opponent_agent, opponent_agent],
+        opponent_policies=[GreedyAgent(), RandomAgent(), RandomAgent()],
         training_stage=training_stage,
         seed=42,
-        max_turns=500,
+        max_turns=2000,
     ))
 
     obs_dim = env.observation_space.shape[0]
@@ -64,7 +55,8 @@ def train(
         obs_dim=obs_dim,
         n_actions=n_actions,
         device=device,
-        epsilon_decay=1_000_000,
+        lr=5e-5, # lower lr for fine-tuning
+        epsilon_decay=2_000_000,
         buffer_capacity=200_000,
         batch_size=128,
         target_update_freq=2000,
@@ -72,7 +64,8 @@ def train(
 
     if load_path and os.path.exists(load_path):
         agent.load(load_path)
-        print(f"Loaded checkpoint from {load_path}")
+        agent.steps_done = 1_200_000
+        print(f"Loaded checkpoint from {load_path}, epsilon reset to {agent.epsilon:.3f}")
     
     episode_rewards = []
     episode_lengths = []
@@ -142,10 +135,9 @@ def train(
 
 if __name__ == '__main__':
     train(
-        total_episodes=10000,
+        total_episodes=5000,
         training_stage=1,
-        load_path='checkpoints/dqn_phase1.pt',
-        save_path='checkpoints/dqn_phase2.pt',
+        load_path='checkpoints/dqn_phase2.pt',
+        save_path='checkpoints/dqn_phase3.pt',
         log_every=100,
-        opponent_type='greedy'
     )
