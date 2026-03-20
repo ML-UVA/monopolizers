@@ -20,6 +20,7 @@ def train(
         save_path: str = 'checkpoints/dqn_stage1.pt',
         load_path: str = None,
         log_every: int = 100,
+        opponent_type: str = 'random'
 ):
 
     os.makedirs('logs', exist_ok=True)
@@ -34,9 +35,18 @@ def train(
     ]
 )
 
+    match (opponent_type):
+        case 'random':
+            opponent_agent = RandomAgent()
+        case 'greedy':
+            opponent_agent = GreedyAgent()
+        case _:
+            opponent_agent = None
+
+
     env = MonopolyFlattenWrapper(MonopolyEnv(
         num_players=4,
-        opponent_policies=[GreedyAgent(), GreedyAgent(), GreedyAgent()],
+        opponent_policies=[opponent_agent, opponent_agent, opponent_agent],
         training_stage=training_stage,
         seed=42,
         max_turns=500,
@@ -135,5 +145,6 @@ if __name__ == '__main__':
         total_episodes=10000,
         training_stage=1,
         save_path='checkpoints/dqn_stage1.pt',
-        log_every=100
+        log_every=100,
+        opponent_type='random'
     )
