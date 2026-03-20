@@ -39,7 +39,7 @@ def train(
         opponent_policies=[GreedyAgent(), GreedyAgent(), GreedyAgent()],
         training_stage=training_stage,
         seed=42,
-        max_turns=300,
+        max_turns=500,
     ))
 
     obs_dim = env.observation_space.shape[0]
@@ -54,6 +54,10 @@ def train(
         obs_dim=obs_dim,
         n_actions=n_actions,
         device=device,
+        epsilon_decay=1_000_000,
+        buffer_capacity=200_000,
+        batch_size=128,
+        target_update_freq=2000,
     ) # everything else already set as default
 
     if load_path and os.path.exists(load_path):
@@ -128,7 +132,7 @@ def train(
 
 if __name__ == '__main__':
     train(
-        total_episodes=5000,
+        total_episodes=10000,
         training_stage=1,
         save_path='checkpoints/dqn_stage1.pt',
         log_every=100
