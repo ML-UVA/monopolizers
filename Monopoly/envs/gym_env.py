@@ -518,11 +518,11 @@ class MonopolyEnv(gym.Env):
             prop = self.state.properties[prop_idx]
             if not prop.mortgaged and prop.houses_count == 0:
                 mask[31 + prop_idx] = 1  # mortgage
-            elif prop.mortgaged:
-                spec = self.property_specs[prop_idx]
-                unmortgage_cost = int(spec.mortgage_value * 1.1)
-                if player.cash >= unmortgage_cost:
-                    mask[59 + prop_idx] = 1  # unmortgage
+            # elif prop.mortgaged:
+            #     spec = self.property_specs[prop_idx]
+            #     unmortgage_cost = int(spec.mortgage_value * 1.1)
+            #     if player.cash >= unmortgage_cost:
+            #         mask[59 + prop_idx] = 1  # unmortgage
 
         # Stage 2+: selling houses
         # Sell house actions
