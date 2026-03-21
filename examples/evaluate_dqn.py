@@ -58,7 +58,7 @@ def evaluate(
         state = env.unwrapped.state
         print(f"\nEpisode {ep+1} end state:")
         for i, p in enumerate(state.players):
-            marker = "DQN" if i == 0 else f"Greedy{i}"
+            marker = "DQN" if i == 0 else f"{opp_agent}{i}"
             print(f"  {marker}: ${p.cash} | "
                 f"Props: {len(p.properties_owned)} | "
                 f"Status: {p.status.value}")
