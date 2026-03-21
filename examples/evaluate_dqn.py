@@ -58,7 +58,7 @@ def evaluate(
         state = env.unwrapped.state
         print(f"\nEpisode {ep+1} end state:")
         for i, p in enumerate(state.players):
-            marker = "DQN" if i == 0 else f"{opp_agent}{i}"
+            marker = "DQN" if i == 0 else f"{opponent_type}{i}"
             print(f"  {marker}: ${p.cash} | "
                 f"Props: {len(p.properties_owned)} | "
                 f"Status: {p.status.value}")
@@ -79,6 +79,6 @@ def evaluate(
 if __name__ == '__main__':
     evaluate(
         checkpoint_path='examples/checkpoints/dqn_phase3.pt',
-        num_episodes=200,
+        num_episodes=5,
         opponent_type='random'
     )
