@@ -38,7 +38,7 @@ def train(
     env = MonopolyFlattenWrapper(MonopolyEnv(
         num_players=4,
         opponent_policies=[
-            RandomAgent(player_id=1), 
+            GreedyAgent(player_id=1), 
             RandomAgent(player_id=2), 
             RandomAgent(player_id=3)
         ],
@@ -69,7 +69,7 @@ def train(
 
     if load_path and os.path.exists(load_path):
         agent.load(load_path)
-        agent.steps_done = 1_200_000
+        agent.steps_done = 1_000_000
         print(f"Loaded checkpoint from {load_path}, epsilon reset to {agent.epsilon:.3f}")
     
     episode_rewards = []
@@ -142,7 +142,7 @@ if __name__ == '__main__':
     train(
         total_episodes=5000,
         training_stage=1,
-        load_path='checkpoints/dqn_phase3.pt',
-        save_path='checkpoints/dqn_phase4a.pt',
+        load_path='checkpoints/dqn_phase4a.pt',
+        save_path='checkpoints/dqn_phase4b.pt',
         log_every=100,
     )
