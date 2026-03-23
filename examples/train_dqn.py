@@ -53,6 +53,7 @@ def train(
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print(f"obs_dim: {obs_dim}, n_actions: {n_actions}")
+    print(f"Training stage: {training_stage}")
 
     # Create agent
     agent = DQNAgent(
