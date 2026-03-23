@@ -70,7 +70,7 @@ def train(
 
     if load_path and os.path.exists(load_path):
         agent.load(load_path)
-        agent.steps_done = 1_000_000
+        agent.steps_done = 1_500_000
         print(f"Loaded checkpoint from {load_path}, epsilon reset to {agent.epsilon:.3f}")
     
     episode_rewards = []
