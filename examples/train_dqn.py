@@ -6,12 +6,92 @@ import time
 import numpy as np
 import torch
 import logging
+from typing import List
+
+from Monopoly.state import GameState
+from Monopoly.property import PropertySpec
+from Monopoly.rules import RulesEngine, PlayerStatus
 
 from Monopoly.envs.gym_env import MonopolyEnv
 from Monopoly.envs.wrappers import MonopolyFlattenWrapper
 from Monopoly.agents.random import RandomAgent
 from Monopoly.agents.greedy import GreedyAgent
 from Monopoly.agents.dqn import DQNAgent
+
+def compute_net_worth(
+        state: GameState,
+        player_id: int,
+        property_specs: List[PropertySpec],
+        rules_engine: RulesEngine
+):
+    """Compute net worth of player `player_id`"""
+    player = state.players[player_id]
+
+    net_worth = player.cash
+
+    # Add asset values
+    for prop_idx in player.properties_owned:
+        prop = state.properties[prop_idx]
+        spec = property_specs[prop_idx]
+
+        # Don't include mortgage value if not mortgaged yet
+        mv = spec.mortgage_value if prop.mortgaged else 0
+
+        # Determine bonus constant based on monopoly status
+        has_monopoly = rules_engine._has_monopoly(state, prop_idx, player_id)
+        b = 2.0 if has_monopoly else 1.5
+
+        # Count houses and hotels
+        if prop.houses_count == 5:
+            # Hotel
+            n_houses = 0
+            n_hotels = 1
+            # One hotel is equivalent to 5 houses, since you give up the
+            # 4 houses before to get 1 hotel
+            house_investment = 5 * spec.house_cost
+        else:
+            n_houses = prop.houses_count
+            n_hotels = 0
+            house_investment = n_houses * spec.house_cost
+        
+        # Implement asset value formula from paper
+        asset_value = (spec.price - mv) * b + house_investment
+        net_worth += asset_value
+
+    return max(net_worth, 0)
+
+def compute_reward(
+        state: GameState, 
+        player_id: int, # agent's player_id 
+        property_specs: List[PropertySpec], 
+        rules_engine: RulesEngine, 
+        terminated: bool, 
+        won: bool, 
+        c: int = 0.5
+):
+    """Compute reward to `player_id`"""
+    if terminated:
+        return c if won else -c
+    
+    agent_nw = compute_net_worth(state, player_id, property_specs, rules_engine)
+
+    others_nw = sum(
+        compute_net_worth(state, i, property_specs, rules_engine)
+        for i in range(len(state.players))
+        if i != player_id and state.players[i].status == PlayerStatus.ACTIVE
+    )
+
+    if others_nw <= 0:
+        return c    # agent is the only one left, treat as a win
+    
+    rx = agent_nw / others_nw
+    
+    # Center around 0 so reward is positive when ahead, negative when behind
+    # At equal wealth: rx = 1/3 in a 4-player game (agent vs 3 others)
+    # Subtract fair share baseline to center the reward signal
+    fair_share = 1.0 / (len(state.players) - 1)
+    return rx - fair_share
+
 
 
 def train(
@@ -50,9 +130,11 @@ def train(
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
+    property_specs = env.unwrapped.property_specs
+    rules_engine = env.unwrapped.rules_engine
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    print(f"obs_dim: {obs_dim}, n_actions: {n_actions}")
     print(f"Training stage: {training_stage}")
 
     # Create agent
@@ -70,7 +152,7 @@ def train(
 
     if load_path and os.path.exists(load_path):
         agent.load(load_path)
-        agent.steps_done = 1_500_000
+        agent.steps_done = 800_000
         print(f"Loaded checkpoint from {load_path}, epsilon reset to {agent.epsilon:.3f}")
     
     episode_rewards = []
@@ -90,9 +172,24 @@ def train(
 
             action = agent.select_action(obs, legal_mask)
 
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            reward = float(np.clip(reward, -1.0, 1.0))
+            next_obs, env_reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
+
+            state = env.unwrapped.state
+            won = (
+                state.players[env.unwrapped.agent_player_id].status == PlayerStatus.ACTIVE
+                and sum(1 for p in state.players if p.status == PlayerStatus.ACTIVE) == 1
+            )
+
+            reward = compute_reward(
+                state=state,
+                player_id=env.unwrapped.agent_player_id,
+                property_specs=property_specs,
+                rules_engine=rules_engine,
+                terminated=done,
+                won=won,
+                c=0.5   # can tune this
+            )
 
             next_legal_mask = env.unwrapped._get_legal_mask()
 
@@ -120,7 +217,7 @@ def train(
 
         # Logging
         if (episode + 1) % log_every == 0:
-            avg_reward = np.mean(episode_rewards[-log_every:])
+            avg_reward = np.mean(episode_rewards[-log_every:]) / np.mean(episode_lengths[-log_every:])
             avg_length = np.mean(episode_lengths[-log_every:])
             avg_loss = np.mean(losses[-100:]) if losses else 0.0
             logging.info(
@@ -147,5 +244,5 @@ if __name__ == '__main__':
         training_stage=2,
         load_path='checkpoints/dqn_phase4b.pt',
         save_path='checkpoints/dqn_phase4c.pt',
-        log_every=100,
+        log_every=1,
     )
