@@ -60,8 +60,8 @@ def train(
         obs_dim=obs_dim,
         n_actions=n_actions,
         device=device,
-        gamma=0.999,
-        lr=5e-5, # lower lr for fine-tuning
+        gamma=0.99,
+        lr=1e-5, # lower lr for fine-tuning
         epsilon_decay=1_500_000,
         buffer_capacity=200_000,
         batch_size=128,
@@ -91,6 +91,7 @@ def train(
             action = agent.select_action(obs, legal_mask)
 
             next_obs, reward, terminated, truncated, info = env.step(action)
+            reward = float(np.clip(reward, -1.0, 1.0))
             done = terminated or truncated
 
             next_legal_mask = env.unwrapped._get_legal_mask()
@@ -109,6 +110,7 @@ def train(
                 losses.append(loss)
             
             obs = next_obs
+
 
             episode_reward += reward
             episode_length += 1
