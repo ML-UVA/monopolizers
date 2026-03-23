@@ -137,7 +137,7 @@ class DQNAgent:
         loss.backward()
 
         # Clip gradients
-        nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=10)
+        nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         if self.steps_done % self.target_update_freq == 0:
