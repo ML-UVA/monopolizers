@@ -244,5 +244,5 @@ if __name__ == '__main__':
         training_stage=2,
         load_path='checkpoints/dqn_phase4b.pt',
         save_path='checkpoints/dqn_phase4c.pt',
-        log_every=1,
+        log_every=100,
     )
