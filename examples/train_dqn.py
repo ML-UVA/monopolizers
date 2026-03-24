@@ -118,13 +118,13 @@ def train(
     env = MonopolyFlattenWrapper(MonopolyEnv(
         num_players=4,
         opponent_policies=[
-            RandomAgent(player_id=1), 
+            GreedyAgent(player_id=1), 
             RandomAgent(player_id=2), 
             RandomAgent(player_id=3)
         ],
         training_stage=training_stage,
         seed=42,
-        max_turns=2000,
+        max_turns=500,
     ))
 
     obs_dim = env.observation_space.shape[0]
@@ -143,7 +143,7 @@ def train(
         n_actions=n_actions,
         device=device,
         gamma=0.99,
-        lr=1e-5, # lower lr for fine-tuning
+        lr=3e-5, # lower lr for fine-tuning
         epsilon_decay=2_000_000,
         buffer_capacity=200_000,
         batch_size=128,
