@@ -118,7 +118,7 @@ def train(
     env = MonopolyFlattenWrapper(MonopolyEnv(
         num_players=4,
         opponent_policies=[
-            GreedyAgent(player_id=1), 
+            RandomAgent(player_id=1), 
             RandomAgent(player_id=2), 
             RandomAgent(player_id=3)
         ],
@@ -143,8 +143,8 @@ def train(
         n_actions=n_actions,
         device=device,
         gamma=0.99,
-        lr=1e-5, # lower lr for fine-tuning
-        epsilon_decay=1_500_000,
+        lr=1e-4, # lower lr for fine-tuning
+        epsilon_decay=2_000_000,
         buffer_capacity=200_000,
         batch_size=128,
         target_update_freq=2000,
@@ -242,7 +242,7 @@ if __name__ == '__main__':
     train(
         total_episodes=5000,
         training_stage=2,
-        load_path='checkpoints/dqn_phase4b.pt',
-        save_path='checkpoints/dqn_phase4c.pt',
+        # load_path='checkpoints/dqn_phase4b.pt',
+        save_path='checkpoints/dqn_v2_phase1.pt',
         log_every=100,
     )
