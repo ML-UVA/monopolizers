@@ -240,8 +240,8 @@ def train(
 
 if __name__ == '__main__':
     train(
-        total_episodes=5000,
-        training_stage=2,
+        total_episodes=15000,
+        training_stage=1,
         # load_path='checkpoints/dqn_phase4b.pt',
         save_path='checkpoints/dqn_v2_phase1.pt',
         log_every=100,
