@@ -143,7 +143,7 @@ def train(
         n_actions=n_actions,
         device=device,
         gamma=0.99,
-        lr=1e-4, # lower lr for fine-tuning
+        lr=1e-5, # lower lr for fine-tuning
         epsilon_decay=2_000_000,
         buffer_capacity=200_000,
         batch_size=128,
