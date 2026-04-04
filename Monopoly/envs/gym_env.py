@@ -83,10 +83,11 @@ from ..property import load_property_specs
 from ..cards import load_chance_cards, load_community_cards
 from ..trade import decode_trade_action, encode_trade_action, compute_trade_price
 from .renderer import MonopolyRenderer
+from .rollout import RolloutRecorder, save_rollout as _save_rollout
 
 
 # Type alias for reward mode configuration (H1 ablation variable)
-RewardMode = Literal['dense_networth', 'sparse_terminal']
+RewardMode = Literal['dense_networth', 'sparse_terminal', 'modular']
 
 
 class MonopolyEnv(gym.Env):
@@ -123,10 +124,15 @@ class MonopolyEnv(gym.Env):
         max_turns: int = 1000,
         render_mode: Optional[str] = None,
         seed: Optional[int] = None,
-        reward_mode: RewardMode = 'dense_networth'
+        reward_mode: RewardMode = 'dense_networth',
+        record_rollout: bool = False,
+        render_every_n: int = 1,
+        reward_weights: Optional[Dict[str, float]] = None,
+        normalize_rewards: bool = False,
+        reward_clip: Optional[float] = 10.0,
     ):
         """Initialize the Monopoly environment.
-        
+
         Args:
             num_players: Number of players (default 4)
             agent_player_id: Which player index the RL agent controls (default 0)
@@ -137,22 +143,36 @@ class MonopolyEnv(gym.Env):
             reward_mode: Reward strategy for H1 ablation study
                 - 'dense_networth': r = NW_agent / Σ(NW_others) every step
                 - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
+                - 'modular': weighted sum of interpretable components
+            record_rollout: If True, record full game states each step for replay
+            render_every_n: Only render every Nth call (frame skip for training)
+            reward_weights: Component weights for modular reward mode
+            normalize_rewards: Apply online normalization to modular rewards
+            reward_clip: Clip range for reward normalizer
         """
         super().__init__()
-        
+
         self.num_players = num_players
         self.agent_player_id = agent_player_id
         self.max_turns = max_turns
         self.render_mode = render_mode
         self._seed = seed or 42
         self.reward_mode: RewardMode = reward_mode
-        
+
         # Validate reward_mode
-        if reward_mode not in ('dense_networth', 'sparse_terminal'):
+        if reward_mode not in ('dense_networth', 'sparse_terminal', 'modular'):
             raise ValueError(
                 f"Invalid reward_mode '{reward_mode}'. "
-                f"Must be 'dense_networth' or 'sparse_terminal'."
+                f"Must be 'dense_networth', 'sparse_terminal', or 'modular'."
             )
+
+        # Modular reward state (lazy-initialized on first use)
+        self._reward_weights = reward_weights
+        self._normalize_rewards = normalize_rewards
+        self._reward_clip = reward_clip
+        self._modular_reward = None
+        self._last_reward_components: Optional[Dict[str, float]] = None
+        self._last_action: int = 0
         
         # Initialize game components
         self.board = Board.load_standard_board()
@@ -217,10 +237,18 @@ class MonopolyEnv(gym.Env):
         # Net worth cache (invalidated each step to avoid stale data)
         self._net_worth_cache: Optional[np.ndarray] = None
         
-        # Pygame renderer
+        # Pygame renderer (lazy init on first render() call)
         self.renderer: Optional[MonopolyRenderer] = None
-        if self.render_mode == 'human':
-            self.renderer = MonopolyRenderer(self.board, self.property_specs)
+
+        # Rollout recording
+        self.record_rollout = record_rollout
+        self._rollout_recorder: Optional[RolloutRecorder] = None
+        self._net_worth_history: List[List[float]] = []
+        self._last_action_label: str = ""
+
+        # Frame skip
+        self.render_every_n = max(1, render_every_n)
+        self._render_counter = 0
 
     def _compute_property_value(self, prop_idx: int, player_id: int) -> float:
         """
@@ -383,15 +411,38 @@ class MonopolyEnv(gym.Env):
             else:
                 return 0.0  # No reward during play
         
+        elif self.reward_mode == 'modular':
+            # Modular reward: weighted sum of interpretable components
+            if self._modular_reward is None:
+                from ..agents.reward import ModularRewardCalculator
+                self._modular_reward = ModularRewardCalculator(
+                    weights=self._reward_weights,
+                    normalize=self._normalize_rewards,
+                    clip=self._reward_clip,
+                )
+            total, components = self._modular_reward.compute(
+                info=self._get_info(),
+                action=self._last_action,
+                terminated=terminated,
+                truncated=truncated,
+            )
+            self._last_reward_components = components
+            return total
+
         else:
             raise ValueError(f"Unknown reward_mode: {self.reward_mode}")
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Reset the environment to initial state."""
         super().reset(seed=seed)
-        
+
         if seed is not None:
             self._seed = seed
+
+        # Reset modular reward calculator if active
+        if self._modular_reward is not None:
+            self._modular_reward.reset()
+        self._last_reward_components = None
         
         # Create initial game state
         players = []
@@ -431,6 +482,9 @@ class MonopolyEnv(gym.Env):
         self.engine = GameEngine(self.rules_engine, seed=self._seed)
         self._episode_step = 0
         self._net_worth_cache = None  # Invalidate cache for new episode
+        self._render_counter = 0
+        self._net_worth_history = []
+        self._last_action_label = ""
         
         # Reset opponent agents' RNG for reproducibility
         for i, agent in enumerate(self.opponent_policies):
@@ -441,10 +495,23 @@ class MonopolyEnv(gym.Env):
         # If agent is not first player, simulate opponent turns until agent's turn
         while self.state.current_player != self.agent_player_id and not self._is_game_over():
             self._simulate_opponent_turn()
-        
+
+        # Initialize rollout recording if enabled
+        if self.record_rollout:
+            self._refresh_net_worth_cache()
+            nw_list = [float(self._net_worth_cache[i]) for i in range(self.num_players)]
+            self._net_worth_history = [nw_list]
+            self._rollout_recorder = RolloutRecorder(metadata={
+                'seed': self._seed,
+                'reward_mode': self.reward_mode,
+                'num_players': self.num_players,
+                'max_turns': self.max_turns,
+            })
+            self._rollout_recorder.record_initial(self.state, nw_list)
+
         obs = self._get_observation()
         info = self._get_info()
-        
+
         return obs, info
 
     def step(self, action: int) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
@@ -496,7 +563,8 @@ class MonopolyEnv(gym.Env):
         # Compute reward based on configured reward_mode (H1 ablation variable)
         terminated = self._is_game_over()
         truncated = self._episode_step >= self.max_turns
-        
+
+        self._last_action = action
         reward = self._compute_reward(terminated, truncated)
         
         # Simulate opponent turns only if it's no longer the agent's turn
@@ -509,10 +577,25 @@ class MonopolyEnv(gym.Env):
         
         # Refresh cache again after opponent turns (state may have changed)
         self._refresh_net_worth_cache()
-        
+
+        # Record rollout step
+        self._last_action_label = self._action_to_label(action)
+        nw_list = [float(self._net_worth_cache[i]) for i in range(self.num_players)]
+        self._net_worth_history.append(nw_list)
+        if self._rollout_recorder is not None:
+            self._rollout_recorder.record_step(
+                state=self.state,
+                action=action,
+                action_label=self._last_action_label,
+                reward=reward,
+                net_worths=nw_list,
+                terminated=terminated,
+                truncated=truncated,
+            )
+
         obs = self._get_observation()
         info = self._get_info()
-        
+
         return obs, reward, terminated, truncated, info
 
     def _decode_action(self, action: int) -> Dict[str, Any]:
@@ -569,6 +652,34 @@ class MonopolyEnv(gym.Env):
             return {'type': 'pass'}
         else:
             return {'type': 'pass'}
+
+    def _action_to_label(self, action: int) -> str:
+        """Convert a discrete action index to a human-readable label."""
+        decoded = self._decode_action(action)
+        action_type = decoded['type']
+        if action_type == 'roll':
+            return "Roll Dice"
+        elif action_type == 'buy':
+            idx = decoded.get('property_idx')
+            name = self.property_specs[idx].name if idx is not None else "?"
+            return f"Buy {name}"
+        elif action_type == 'pass':
+            return "Pass"
+        elif action_type == 'build':
+            return f"Build on {self.property_specs[decoded['property_idx']].name}"
+        elif action_type == 'mortgage':
+            return f"Mortgage {self.property_specs[decoded['property_idx']].name}"
+        elif action_type == 'unmortgage':
+            return f"Unmortgage {self.property_specs[decoded['property_idx']].name}"
+        elif action_type == 'pay_fine':
+            return "Pay Jail Fine ($50)"
+        elif action_type == 'use_jail_card':
+            return "Use Get Out of Jail Card"
+        elif action_type == 'end_turn':
+            return "End Turn"
+        elif action_type == 'trade':
+            return f"Sell {self.property_specs[decoded['property_idx']].name} to P{decoded['buyer_id']}"
+        return f"Action {action}"
 
     def _get_observation(self) -> Dict[str, Any]:
         """Generate observation from current game state."""
@@ -789,14 +900,43 @@ class MonopolyEnv(gym.Env):
             'active_players': sum(1 for p in self.state.players if p.status == PlayerStatus.ACTIVE),
             'has_rolled': self.state.has_rolled,
             'awaiting_buy_decision': self.state.awaiting_buy_decision,
+            'reward_components': self._last_reward_components,
         }
+
+    def save_rollout(self, path: str) -> None:
+        """Save the recorded rollout to a gzip-compressed pickle file."""
+        if self._rollout_recorder is None:
+            raise RuntimeError("Rollout recording not enabled (set record_rollout=True)")
+        from pathlib import Path as _Path
+        _save_rollout(self._rollout_recorder.finalize(), _Path(path))
+
+    @property
+    def current_rollout(self):
+        """Return the current rollout (finalized copy)."""
+        if self._rollout_recorder is None:
+            return None
+        return self._rollout_recorder.finalize()
 
     def render(self):
         """Render the current game state."""
         if self.render_mode == 'human':
-            # Use pygame renderer
-            if self.renderer and self.state:
-                self.renderer.render(self.state, show_stats=True)
+            # Frame skip
+            self._render_counter += 1
+            if self._render_counter % self.render_every_n != 0:
+                return
+            # Lazy init
+            if self.renderer is None:
+                self.renderer = MonopolyRenderer(self.board, self.property_specs)
+            if self.state:
+                overlay = {
+                    'net_worths': [float(self._net_worth_cache[i]) for i in range(self.num_players)]
+                        if self._net_worth_cache is not None else None,
+                    'action_label': self._last_action_label,
+                    'net_worth_history': self._net_worth_history,
+                    'turn_number': self.state.turn_number,
+                    'total_turns': self.max_turns,
+                }
+                self.renderer.render(self.state, show_stats=True, overlay_data=overlay)
         elif self.render_mode == 'ansi':
             # Text-based rendering with net worth
             print(f"\n{'='*60}")

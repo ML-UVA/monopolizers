@@ -1,0 +1,44 @@
+# DDQN-Hybrid Fast Preset
+# Smaller buffer, faster decay — for quick iteration and debugging
+
+gamma: 0.99
+lr: 3.0e-4
+batch_size: 32
+buffer_size: 50000
+learning_starts: 500
+target_update_interval: 500
+train_freq: 4
+eps_start: 1.0
+eps_end: 0.05
+eps_decay: 50000
+hidden_dims: [256, 256]
+grad_clip: 10.0
+use_huber_loss: true
+
+target_update_mode: hard
+tau: 0.005
+
+use_per: false
+per_alpha: 0.6
+per_beta_start: 0.4
+per_beta_frames: 50000
+
+reward_mode: dense_networth
+
+reward_weights:
+  delta_networth: 1.0
+  buy_property: 0.1
+  build: 0.05
+  bankrupt: -1.0
+  time_penalty: -0.001
+
+normalize_rewards: false
+reward_clip: 10.0
+
+total_timesteps: 100000
+eval_interval: 25000
+eval_episodes: 20
+log_interval: 500
+save_interval: 25000
+max_turns: 500
+seed: 42

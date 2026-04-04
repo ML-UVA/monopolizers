@@ -228,6 +228,8 @@ def make_monopoly_env(
     seed: Optional[int] = None,
     flatten: bool = True,
     reward_mode: RewardMode = 'dense_networth',
+    trace_dir: Optional[str] = None,
+    render_mode: Optional[str] = None,
 ) -> gym.Env:
     """
     Create a Monopoly environment with 4 players:
@@ -235,7 +237,7 @@ def make_monopoly_env(
     - Player 1: Random Bot
     - Player 2: MCTS Bot
     - Player 3: Greedy Bot
-    
+
     Args:
         num_players: Number of players (always 4 for this setup)
         agent_player_id: Player ID for the RL agent (always 0)
@@ -245,13 +247,15 @@ def make_monopoly_env(
         reward_mode: Reward strategy (H1 ablation)
             - 'dense_networth': r = nw_agent / sum(nw_others) every step
             - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
-        
+        trace_dir: If set, wraps env with EpisodeTracer writing to this directory
+        render_mode: Render mode ('human', 'ansi', or None to disable)
+
     Returns:
         Gymnasium environment
     """
     # Create opponent agents with derived seeds
     opponents = create_opponent_agents(seed=seed or 42)
-    
+
     # Create base environment with configurable reward mode
     env = MonopolyEnv(
         num_players=4,
@@ -259,16 +263,22 @@ def make_monopoly_env(
         opponent_policies=opponents,
         max_turns=max_turns,
         seed=seed,
-        reward_mode=reward_mode
+        reward_mode=reward_mode,
+        render_mode=render_mode,
     )
-    
+
+    # Optional episode tracing (must go before flatten)
+    if trace_dir:
+        from Monopoly.envs.tracing import EpisodeTracer
+        env = EpisodeTracer(env, output_dir=trace_dir)
+
     # Apply flatten wrapper
     if flatten:
         env = MonopolyFlattenWrapper(env)
-    
+
     # Add monitor for logging
     env = Monitor(env)
-    
+
     return env
 
 
@@ -277,6 +287,7 @@ def make_vec_env(
     max_turns: int = 500,
     seed: Optional[int] = None,
     reward_mode: RewardMode = 'dense_networth',
+    render_mode: Optional[str] = None,
 ) -> VecMonitor:
     """
     Create a vectorized environment for parallel training.
@@ -286,6 +297,7 @@ def make_vec_env(
         max_turns: Maximum turns
         seed: Base random seed
         reward_mode: Reward strategy (H1 ablation)
+        render_mode: Render mode ('human', 'ansi', or None to disable)
         
     Returns:
         Vectorized environment
@@ -296,7 +308,8 @@ def make_vec_env(
             return make_monopoly_env(
                 max_turns=max_turns,
                 seed=env_seed,
-                reward_mode=reward_mode
+                reward_mode=reward_mode,
+                render_mode=render_mode,
             )
         return _init
     
@@ -384,7 +397,8 @@ def train_dqn(
     eval_interval: int = 5000,
     n_eval_episodes: int = 10,
     verbose: int = 1,
-    reward_mode: RewardMode = 'dense_networth'
+    reward_mode: RewardMode = 'dense_networth',
+    render: bool = False,
 ) -> DQN:
     """
     Train a DQN agent using Stable-Baselines3.
@@ -407,6 +421,7 @@ def train_dqn(
         reward_mode: Reward strategy (H1 ablation)
             - 'dense_networth': r = nw_agent / sum(nw_others) every step
             - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
+        render: Whether to enable visualization (slows training)
         
     Returns:
         Trained DQN model
@@ -428,14 +443,18 @@ def train_dqn(
     run_id = get_run_id('dqn', seed)
     csv_path = results_dir / 'dqn_metrics.csv'
     
+    # Determine render mode
+    render_mode = 'human' if render else None
+    
     print("=" * 60)
-    print("Monopoly DQN Training (4-Player Mode) - H1 Ablation")
+    print("Monopoly DQN Training (4-Player Mode)")
     print("=" * 60)
     print(f"Total timesteps: {total_timesteps}")
     print(f"Players: 4 (RL Agent vs Random, MCTS, Greedy)")
     print(f"Reward mode: {reward_mode}")
     print(f"Config preset: {config_preset}")
     print(f"Seed: {seed}")
+    print(f"Render: {render}")
     print(f"Output directory: {output_dir}")
     print("=" * 60)
     
@@ -445,16 +464,18 @@ def train_dqn(
         n_envs=1,
         max_turns=max_turns,
         seed=seed,
-        reward_mode=reward_mode
+        reward_mode=reward_mode,
+        render_mode=render_mode,
     )
     
-    # Create evaluation environment with same reward mode
+    # Create evaluation environment with same reward mode (no render for eval)
     print("Creating evaluation environment...")
     eval_env = make_vec_env(
         n_envs=1,
         max_turns=max_turns,
         seed=seed + 1000,
-        reward_mode=reward_mode
+        reward_mode=reward_mode,
+        render_mode=None,  # Eval env never renders
     )
     
     # Get hyperparameters
@@ -560,7 +581,8 @@ def train_ddqn_hybrid(
     eval_episodes: int = 100,
     verbose: int = 1,
     config: Optional[Dict[str, Any]] = None,
-    reward_mode: RewardMode = 'dense_networth'
+    reward_mode: RewardMode = 'dense_networth',
+    render: bool = False,
 ) -> None:
     """
     Train using custom DDQN-Hybrid trainer with PyTorch.
@@ -580,6 +602,7 @@ def train_ddqn_hybrid(
         reward_mode: Reward strategy (H1 ablation)
             - 'dense_networth': r = nw_agent / sum(nw_others) every step
             - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
+        render: Whether to enable visualization (slows training)
     """
     # Set seeds
     set_global_seeds(seed)
@@ -587,12 +610,16 @@ def train_ddqn_hybrid(
     # Import DDQN trainer
     from Monopoly.agents.ddqn_hybrid import DDQNHybridTrainer
     
+    # Determine render mode
+    render_mode = 'human' if render else None
+    
     print("=" * 60)
-    print("Monopoly DDQN-Hybrid Training (4-Player Mode) - H1 Ablation")
+    print("Monopoly DDQN-Hybrid Training (4-Player Mode)")
     print("=" * 60)
     print(f"Total timesteps: {total_timesteps}")
     print(f"Reward mode: {reward_mode}")
     print(f"Seed: {seed}")
+    print(f"Render: {render}")
     print("=" * 60)
     
     # Create environments with configured reward mode
@@ -601,7 +628,8 @@ def train_ddqn_hybrid(
         max_turns=max_turns,
         seed=seed,
         flatten=True,
-        reward_mode=reward_mode
+        reward_mode=reward_mode,
+        render_mode=render_mode,
     )
     
     print("Creating evaluation environment...")
@@ -609,7 +637,8 @@ def train_ddqn_hybrid(
         max_turns=max_turns,
         seed=seed + 1000,
         flatten=True,
-        reward_mode=reward_mode
+        reward_mode=reward_mode,
+        render_mode=None,  # Eval env never renders
     )
     
     # Create trainer
@@ -649,7 +678,8 @@ def evaluate_model(
     max_turns: int = 500,
     seed: int = 42,
     render: bool = False,
-    verbose: bool = True
+    verbose: bool = True,
+    trace_dir: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Evaluate a trained DQN model in 4-player mode.
@@ -683,6 +713,7 @@ def evaluate_model(
         max_turns=max_turns,
         seed=seed,
         flatten=True,
+        trace_dir=trace_dir,
     )
     
     # Run evaluation
@@ -895,8 +926,12 @@ Examples:
     
     # H1 Ablation: Reward mode
     parser.add_argument('--reward_mode', type=str, default='dense_networth',
-                       choices=['dense_networth', 'sparse_terminal'],
-                       help='Reward strategy for H1 ablation: dense_networth (shaped) or sparse_terminal')
+                       choices=['dense_networth', 'sparse_terminal', 'modular'],
+                       help='Reward strategy: dense_networth (shaped), sparse_terminal, or modular (component-based)')
+
+    # YAML config file for DDQN-Hybrid
+    parser.add_argument('--config_file', type=str, default=None,
+                       help='Path to YAML config file for DDQN-Hybrid (CLI args override YAML values)')
     
     # Evaluation parameters
     parser.add_argument('--model', type=str, default='models/monopoly_dqn_final.zip',
@@ -904,10 +939,23 @@ Examples:
     parser.add_argument('--episodes', type=int, default=100, 
                        help='Number of evaluation episodes')
     
+    # Tracing
+    parser.add_argument('--trace_eval', action='store_true',
+                        help='Enable episode tracing during evaluation (writes to output_dir/analysis/traces)')
+
+    # Rendering
+    parser.add_argument('--no-render', action='store_true', dest='no_render',
+                        help='Disable visualization during training/evaluation (default: rendering disabled)')
+    parser.add_argument('--render', action='store_true',
+                        help='Enable visualization during training/evaluation (slows down training)')
+
     # Other
     parser.add_argument('--verbose', type=int, default=1, help='Verbosity level')
     
     args = parser.parse_args()
+    
+    # Resolve render flag (--render enables, --no-render disables, default is disabled)
+    enable_render = args.render and not args.no_render
     
     # Determine output directory based on agent type and reward mode
     if args.output_dir == 'runs/':
@@ -924,9 +972,15 @@ Examples:
                 eval_interval=args.eval_interval,
                 n_eval_episodes=10,
                 reward_mode=args.reward_mode,
-                verbose=args.verbose
+                verbose=args.verbose,
+                render=enable_render,
             )
         elif args.agent == 'ddqn_hybrid':
+            # Build config overrides from YAML + CLI
+            ddqn_config = None
+            if args.config_file:
+                from Monopoly.agents.ddqn_hybrid import load_yaml_config
+                ddqn_config = load_yaml_config(args.config_file)
             train_ddqn_hybrid(
                 total_timesteps=args.total_timesteps,
                 max_turns=args.max_turns,
@@ -935,15 +989,22 @@ Examples:
                 eval_interval=args.eval_interval,
                 eval_episodes=100,
                 reward_mode=args.reward_mode,
-                verbose=args.verbose
+                verbose=args.verbose,
+                config=ddqn_config,
+                render=enable_render,
             )
     
     if args.evaluate:
+        trace_dir = None
+        if args.trace_eval:
+            trace_dir = str(Path(args.output_dir) / 'analysis' / 'traces')
         evaluate_model(
             model_path=args.model,
             num_episodes=args.episodes,
             max_turns=args.max_turns,
-            seed=args.seed
+            seed=args.seed,
+            trace_dir=trace_dir,
+            render=enable_render,
         )
     
     if args.baseline:

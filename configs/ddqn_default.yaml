@@ -1,0 +1,51 @@
+# DDQN-Hybrid Default Hyperparameters
+# Matches DEFAULT_CONFIG in Monopoly/agents/ddqn_hybrid.py
+
+# Core DDQN parameters
+gamma: 0.99
+lr: 1.0e-4
+batch_size: 64
+buffer_size: 100000
+learning_starts: 1000
+target_update_interval: 1000
+train_freq: 4
+eps_start: 1.0
+eps_end: 0.05
+eps_decay: 100000
+hidden_dims: [256, 256]
+grad_clip: 10.0
+use_huber_loss: true
+
+# Target update mode: 'hard' (periodic copy) or 'soft' (Polyak averaging)
+target_update_mode: hard
+tau: 0.005  # Only used when target_update_mode is 'soft'
+
+# Prioritized Experience Replay (opt-in)
+use_per: false
+per_alpha: 0.6
+per_beta_start: 0.4
+per_beta_frames: 100000
+
+# Reward mode: dense_networth | sparse_terminal | modular
+reward_mode: dense_networth
+
+# Modular reward weights (only used when reward_mode is 'modular')
+reward_weights:
+  delta_networth: 1.0
+  buy_property: 0.1
+  build: 0.05
+  bankrupt: -1.0
+  time_penalty: -0.001
+
+# Reward normalization (works with any reward mode)
+normalize_rewards: false
+reward_clip: 10.0
+
+# Training schedule
+total_timesteps: 500000
+eval_interval: 100000
+eval_episodes: 50
+log_interval: 1000
+save_interval: 50000
+max_turns: 500
+seed: 42

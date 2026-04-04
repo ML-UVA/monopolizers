@@ -1,6 +1,6 @@
 import gymnasium as gym
 import numpy as np
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Callable
 
 
 class MonopolyFlattenWrapper(gym.ObservationWrapper):
@@ -137,9 +137,127 @@ class ActionMaskWrapper(gym.Wrapper):
 
 
 # NOTE: RewardShapingWrapper has been REMOVED.
-# 
+#
 # All reward logic for the H1 ablation study is handled directly in MonopolyEnv
-# via the `reward_mode` parameter. Using a separate wrapper would create 
+# via the `reward_mode` parameter. Using a separate wrapper would create
 # confounders and experimental ambiguity.
 #
 # If you need the old RewardShapingWrapper for other purposes, see git history.
+
+
+class PettingZooToGymWrapper(gym.Env):
+    """Single-agent Gymnasium wrapper around MonopolyAECEnv.
+
+    One player is the learning agent; all others use provided opponent policies.
+    This provides a gym-compatible interface backed by the PettingZoo AEC env.
+
+    Usage:
+        from Monopoly.envs.pettingzoo_env import MonopolyAECEnv
+        aec = MonopolyAECEnv(seed=42)
+        env = PettingZooToGymWrapper(aec, agent_id="player_0")
+        obs, info = env.reset()
+        obs, reward, term, trunc, info = env.step(action)
+    """
+
+    metadata = {"render_modes": ["human", "ansi"], "render_fps": 1}
+
+    def __init__(
+        self,
+        aec_env,
+        agent_id: str = "player_0",
+        opponent_policies: Optional[Dict[str, Callable]] = None,
+    ):
+        super().__init__()
+        self.aec_env = aec_env
+        self.agent_id = agent_id
+        self.opponent_policies = opponent_policies or {}
+
+        # Mirror spaces from the AEC env
+        self.observation_space = aec_env.observation_space(agent_id)
+        self.action_space = aec_env.action_space(agent_id)
+
+    def reset(self, seed=None, options=None) -> Tuple[Dict, Dict]:
+        """Reset and simulate opponent turns until learning agent's turn."""
+        self.aec_env.reset(seed=seed, options=options)
+
+        # Simulate opponent turns if agent isn't first
+        self._simulate_opponents()
+
+        obs = self.aec_env.observe(self.agent_id)
+        return obs, {}
+
+    def step(self, action: int) -> Tuple[Dict, float, bool, bool, Dict]:
+        """Take action for the learning agent, then simulate opponents."""
+        self.aec_env.step(action)
+
+        # Collect reward for this agent
+        reward = self.aec_env.rewards.get(self.agent_id, 0.0)
+
+        # Check if game ended
+        terminated = self.aec_env.terminations.get(self.agent_id, False)
+        truncated = self.aec_env.truncations.get(self.agent_id, False)
+
+        if terminated or truncated:
+            obs = self.aec_env.observe(self.agent_id)
+            info = self.aec_env.infos.get(self.agent_id, {})
+            return obs, reward, terminated, truncated, info
+
+        # Simulate opponent turns until it's our agent's turn again
+        self._simulate_opponents()
+
+        # Accumulate rewards earned during opponent turns
+        reward += self.aec_env.rewards.get(self.agent_id, 0.0)
+
+        terminated = self.aec_env.terminations.get(self.agent_id, False)
+        truncated = self.aec_env.truncations.get(self.agent_id, False)
+
+        obs = self.aec_env.observe(self.agent_id)
+        info = self.aec_env.infos.get(self.agent_id, {})
+        return obs, reward, terminated, truncated, info
+
+    def _simulate_opponents(self) -> None:
+        """Step through opponent agents until it's the learning agent's turn."""
+        max_opponent_steps = 200  # Safety limit
+        steps = 0
+
+        while (
+            self.aec_env.agent_selection != self.agent_id
+            and self.aec_env.agents
+            and steps < max_opponent_steps
+        ):
+            current = self.aec_env.agent_selection
+            terminated = self.aec_env.terminations.get(current, False)
+            truncated = self.aec_env.truncations.get(current, False)
+
+            if terminated or truncated:
+                self.aec_env.step(None)  # dead step
+                steps += 1
+                continue
+
+            # Get observation and select action
+            obs = self.aec_env.observe(current)
+            mask = obs["action_mask"]
+            legal_actions = np.where(mask == 1)[0]
+
+            if current in self.opponent_policies:
+                action = self.opponent_policies[current](obs, legal_actions)
+            elif len(legal_actions) > 0:
+                action = int(legal_actions[0])  # Default: first legal action
+            else:
+                action = 89  # end_turn fallback
+
+            self.aec_env.step(action)
+            steps += 1
+
+            # Check if game ended during opponent play
+            if (
+                self.aec_env.terminations.get(self.agent_id, False)
+                or self.aec_env.truncations.get(self.agent_id, False)
+            ):
+                break
+
+    def render(self):
+        self.aec_env.render()
+
+    def close(self):
+        self.aec_env.close()

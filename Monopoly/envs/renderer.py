@@ -10,9 +10,11 @@ This module provides an authentic Monopoly-style graphical interface with:
 - Enhanced stats panel with net worth
 """
 
+import os
 import pygame
 import sys
 import math
+import numpy as np
 from typing import Optional, Tuple, Dict, List
 from ..state import GameState, PlayerStatus
 from ..board import Board, TileKind
@@ -90,17 +92,23 @@ GROUP_COLORS = {
 class MonopolyRenderer:
     """Authentic Monopoly-style pygame renderer."""
     
-    def __init__(self, board: Board, property_specs: List[PropertySpec], 
-                 width: int = 1400, height: int = 900):
+    def __init__(self, board: Board, property_specs: List[PropertySpec],
+                 width: int = 1400, height: int = 960, headless: bool = False):
+        self.headless = headless
+        if headless:
+            os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')
         pygame.init()
-        
+
         self.board = board
         self.property_specs = property_specs
         self.width = width
         self.height = height
-        
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("MONOPOLY")
+
+        if headless:
+            self.screen = pygame.Surface((width, height))
+        else:
+            self.screen = pygame.display.set_mode((width, height))
+            pygame.display.set_caption("MONOPOLY")
         
         self._init_fonts()
         self.background_surface = self._create_background_surface(width, height)
@@ -197,25 +205,61 @@ class MonopolyRenderer:
         
         return positions
     
-    def render(self, state: GameState, show_stats: bool = True):
-        """Render the complete game state."""
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-        
+    def render(self, state: GameState, show_stats: bool = True,
+               overlay_data: Optional[Dict] = None):
+        """Render the complete game state.
+
+        Args:
+            state: Current GameState to render.
+            show_stats: Whether to draw the stats panel.
+            overlay_data: Optional dict with overlay info:
+                'net_worths': List[float] per player
+                'action_label': str of last action
+                'net_worth_history': List[List[float]] time series
+                'turn_number': int
+                'total_turns': int
+        """
+        if not self.headless:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+
         self.screen.blit(self.background_surface, (0, 0))
         self._draw_board_shadow()
         self._draw_board(state)
         self._draw_center_area(state)
         self._draw_all_tiles(state)
         self._draw_players(state)
-        
+
         if show_stats:
             self._draw_stats_panel(state)
-        
-        pygame.display.flip()
+
+        # Overlays
+        if overlay_data:
+            if overlay_data.get('action_label'):
+                self._draw_action_overlay(overlay_data['action_label'], state)
+            if overlay_data.get('net_worth_history') and len(overlay_data['net_worth_history']) > 1:
+                panel_x = self.board_margin + self.board_size + 20
+                panel_w = self.width - panel_x - 20
+                graph_y = self.height - 60 - 130  # above control bar area
+                self._draw_timeline_graph(
+                    overlay_data['net_worth_history'],
+                    panel_x + 10, graph_y, panel_w - 20, 110,
+                )
+            if overlay_data.get('turn_number') is not None and overlay_data.get('total_turns'):
+                self._draw_progress_bar(
+                    overlay_data['turn_number'], overlay_data['total_turns'],
+                    self.board_margin, self.height - 55, self.board_size,
+                )
+
+        if not self.headless:
+            pygame.display.flip()
         self.clock.tick(self.fps)
+
+    def capture_frame(self) -> np.ndarray:
+        """Return current screen as (H, W, 3) uint8 numpy array for video export."""
+        return pygame.surfarray.array3d(self.screen).transpose(1, 0, 2).copy()
     
     def _draw_board_shadow(self):
         """Draw drop shadow under board."""
@@ -1125,6 +1169,84 @@ class MonopolyRenderer:
             cards = self.font_tiny.render(f"Jail Cards: {player.get_out_of_jail_cards}", True, COLORS['text_green'])
             self.screen.blit(cards, (x + 120, ty))
 
+    # ------------------------------------------------------------------
+    # Overlay drawing methods
+    # ------------------------------------------------------------------
+
+    def _draw_action_overlay(self, action_label: str, state: GameState):
+        """Draw a semi-transparent banner showing the last action in the board center."""
+        m = self.board_margin
+        cs = self.corner_size
+        bs = self.board_size
+        cx = m + cs
+        cw = bs - 2 * cs
+
+        banner_h = 30
+        banner_y = m + bs - cs - banner_h - 5
+        banner_surf = pygame.Surface((cw, banner_h), pygame.SRCALPHA)
+        banner_surf.fill((0, 0, 0, 160))
+        self.screen.blit(banner_surf, (cx, banner_y))
+
+        text = f"P{state.current_player}: {action_label}"
+        rendered = self.font_small.render(text, True, COLORS['white'])
+        tx = cx + (cw - rendered.get_width()) // 2
+        ty = banner_y + (banner_h - rendered.get_height()) // 2
+        self.screen.blit(rendered, (tx, ty))
+
+    def _draw_timeline_graph(self, net_worth_history: List[List[float]],
+                             x: int, y: int, w: int, h: int):
+        """Draw a small net worth time-series line chart."""
+        if not net_worth_history or len(net_worth_history) < 2:
+            return
+
+        # Background
+        bg = pygame.Surface((w, h), pygame.SRCALPHA)
+        bg.fill((255, 255, 255, 200))
+        self.screen.blit(bg, (x, y))
+        pygame.draw.rect(self.screen, COLORS['text_light'], (x, y, w, h), 1)
+
+        # Label
+        label = self.font_price.render("Net Worth Timeline", True, COLORS['text_dark'])
+        self.screen.blit(label, (x + 4, y + 2))
+
+        num_players = len(net_worth_history[0])
+        num_steps = len(net_worth_history)
+        all_vals = [v for step in net_worth_history for v in step]
+        max_val = max(all_vals) if all_vals else 1
+        min_val = min(all_vals) if all_vals else 0
+        val_range = max(1, max_val - min_val)
+
+        graph_top = y + 16
+        graph_h = h - 20
+        graph_left = x + 2
+        graph_w = w - 4
+
+        for pid in range(num_players):
+            color = COLORS['token_colors'][pid % len(COLORS['token_colors'])]
+            points = []
+            for i, step_nw in enumerate(net_worth_history):
+                if pid < len(step_nw):
+                    px = graph_left + int(i / max(1, num_steps - 1) * graph_w)
+                    py = graph_top + graph_h - int((step_nw[pid] - min_val) / val_range * graph_h)
+                    points.append((px, py))
+            if len(points) >= 2:
+                pygame.draw.lines(self.screen, color, False, points, 2)
+
+    def _draw_progress_bar(self, turn_number: int, total_turns: int,
+                           x: int, y: int, w: int):
+        """Draw a thin progress bar showing game progress."""
+        bar_h = 6
+        # Background track
+        pygame.draw.rect(self.screen, (180, 180, 180), (x, y, w, bar_h), border_radius=3)
+        # Filled portion
+        progress = min(1.0, turn_number / max(1, total_turns))
+        fill_w = max(4, int(w * progress))
+        color = COLORS['text_green'] if progress < 0.8 else COLORS['hotel_red']
+        pygame.draw.rect(self.screen, color, (x, y, fill_w, bar_h), border_radius=3)
+        # Label
+        label = self.font_price.render(f"Turn {turn_number}/{total_turns}", True, COLORS['text_dark'])
+        self.screen.blit(label, (x + w + 5, y - 2))
+
     def _compute_player_net_worth(self, player, state: GameState) -> int:
         """Aggregate player liquid cash, property values, and structures."""
         total = player.cash
@@ -1138,6 +1260,162 @@ class MonopolyRenderer:
                 total += prop_state.houses_count * prop_spec.house_cost
         return max(0, total)
     
+    # ------------------------------------------------------------------
+    # Playback UI controls
+    # ------------------------------------------------------------------
+
+    def init_playback_ui(self):
+        """Initialize playback UI state. Call once before using control bar."""
+        self.paused = True
+        self.playback_speed = 1.0
+        self._control_bar_height = 50
+        self._button_rects: Dict[str, pygame.Rect] = {}
+        self._speed_options = [0.5, 1.0, 2.0, 4.0, 8.0]
+
+    def _draw_control_bar(self, current_step: int, total_steps: int):
+        """Draw the playback control bar at the bottom of the window."""
+        bar_y = self.height - self._control_bar_height
+        bar_h = self._control_bar_height
+
+        # Background
+        pygame.draw.rect(self.screen, (40, 40, 40), (0, bar_y, self.width, bar_h))
+        pygame.draw.line(self.screen, (80, 80, 80), (0, bar_y), (self.width, bar_y), 1)
+
+        x_cursor = 15
+
+        # Play/Pause button
+        btn_w, btn_h = 60, 32
+        btn_y = bar_y + (bar_h - btn_h) // 2
+        play_rect = pygame.Rect(x_cursor, btn_y, btn_w, btn_h)
+        self._button_rects['play_pause'] = play_rect
+        btn_color = (80, 180, 80) if self.paused else (180, 80, 80)
+        pygame.draw.rect(self.screen, btn_color, play_rect, border_radius=4)
+        label = self.font_tiny.render("PLAY" if self.paused else "PAUSE", True, COLORS['white'])
+        self.screen.blit(label, (play_rect.x + (btn_w - label.get_width()) // 2,
+                                 play_rect.y + (btn_h - label.get_height()) // 2))
+        x_cursor += btn_w + 10
+
+        # Step Back
+        sb_rect = pygame.Rect(x_cursor, btn_y, 32, btn_h)
+        self._button_rects['step_back'] = sb_rect
+        pygame.draw.rect(self.screen, (100, 100, 100), sb_rect, border_radius=4)
+        lb = self.font_tiny.render("<<", True, COLORS['white'])
+        self.screen.blit(lb, (sb_rect.x + (32 - lb.get_width()) // 2,
+                              sb_rect.y + (btn_h - lb.get_height()) // 2))
+        x_cursor += 42
+
+        # Step Forward
+        sf_rect = pygame.Rect(x_cursor, btn_y, 32, btn_h)
+        self._button_rects['step_forward'] = sf_rect
+        pygame.draw.rect(self.screen, (100, 100, 100), sf_rect, border_radius=4)
+        lf = self.font_tiny.render(">>", True, COLORS['white'])
+        self.screen.blit(lf, (sf_rect.x + (32 - lf.get_width()) // 2,
+                              sf_rect.y + (btn_h - lf.get_height()) // 2))
+        x_cursor += 50
+
+        # Speed selector buttons
+        for spd in self._speed_options:
+            spd_w = 40
+            spd_rect = pygame.Rect(x_cursor, btn_y, spd_w, btn_h)
+            self._button_rects[f'speed_{spd}'] = spd_rect
+            is_active = abs(self.playback_speed - spd) < 0.01
+            bg = (0, 100, 200) if is_active else (70, 70, 70)
+            pygame.draw.rect(self.screen, bg, spd_rect, border_radius=4)
+            sl = self.font_tiny.render(f"{spd}x", True, COLORS['white'])
+            self.screen.blit(sl, (spd_rect.x + (spd_w - sl.get_width()) // 2,
+                                  spd_rect.y + (btn_h - sl.get_height()) // 2))
+            x_cursor += spd_w + 5
+
+        x_cursor += 10
+
+        # Progress bar (seekable)
+        prog_w = self.width - x_cursor - 120
+        if prog_w > 50:
+            prog_rect = pygame.Rect(x_cursor, btn_y + 8, prog_w, 16)
+            self._button_rects['progress'] = prog_rect
+            pygame.draw.rect(self.screen, (80, 80, 80), prog_rect, border_radius=8)
+            if total_steps > 0:
+                fill = max(4, int(prog_w * current_step / max(1, total_steps - 1)))
+                pygame.draw.rect(self.screen, (0, 150, 255),
+                                 (prog_rect.x, prog_rect.y, fill, 16), border_radius=8)
+            x_cursor += prog_w + 10
+
+        # Step counter
+        counter = self.font_small.render(f"{current_step}/{total_steps - 1}", True, COLORS['white'])
+        self.screen.blit(counter, (self.width - 110, bar_y + (bar_h - counter.get_height()) // 2))
+
+    def handle_playback_events(self) -> Dict:
+        """Process pygame events for playback controls.
+
+        Returns dict: {quit, paused, speed, step_forward, step_back, seek_to}
+        """
+        result = {
+            'quit': False,
+            'paused': self.paused,
+            'speed': self.playback_speed,
+            'step_forward': False,
+            'step_back': False,
+            'seek_to': None,
+        }
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                result['quit'] = True
+                return result
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    self.paused = not self.paused
+                    result['paused'] = self.paused
+                elif event.key == pygame.K_RIGHT:
+                    result['step_forward'] = True
+                    self.paused = True
+                    result['paused'] = True
+                elif event.key == pygame.K_LEFT:
+                    result['step_back'] = True
+                    self.paused = True
+                    result['paused'] = True
+                elif event.key in (pygame.K_PLUS, pygame.K_EQUALS):
+                    idx = self._speed_options.index(self.playback_speed) if self.playback_speed in self._speed_options else 1
+                    if idx < len(self._speed_options) - 1:
+                        self.playback_speed = self._speed_options[idx + 1]
+                        result['speed'] = self.playback_speed
+                elif event.key == pygame.K_MINUS:
+                    idx = self._speed_options.index(self.playback_speed) if self.playback_speed in self._speed_options else 1
+                    if idx > 0:
+                        self.playback_speed = self._speed_options[idx - 1]
+                        result['speed'] = self.playback_speed
+                elif event.key == pygame.K_q:
+                    result['quit'] = True
+                    return result
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                if self._button_rects.get('play_pause') and self._button_rects['play_pause'].collidepoint(mx, my):
+                    self.paused = not self.paused
+                    result['paused'] = self.paused
+                elif self._button_rects.get('step_back') and self._button_rects['step_back'].collidepoint(mx, my):
+                    result['step_back'] = True
+                    self.paused = True
+                    result['paused'] = True
+                elif self._button_rects.get('step_forward') and self._button_rects['step_forward'].collidepoint(mx, my):
+                    result['step_forward'] = True
+                    self.paused = True
+                    result['paused'] = True
+                elif self._button_rects.get('progress') and self._button_rects['progress'].collidepoint(mx, my):
+                    prog_rect = self._button_rects['progress']
+                    ratio = (mx - prog_rect.x) / max(1, prog_rect.width)
+                    result['seek_to'] = max(0.0, min(1.0, ratio))
+                else:
+                    for spd in self._speed_options:
+                        key = f'speed_{spd}'
+                        if self._button_rects.get(key) and self._button_rects[key].collidepoint(mx, my):
+                            self.playback_speed = spd
+                            result['speed'] = spd
+                            break
+
+        return result
+
     def close(self):
         """Clean up pygame resources."""
         pygame.quit()

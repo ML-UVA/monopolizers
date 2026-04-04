@@ -4,6 +4,7 @@ python -m pip install numpy pandas matplotlib seaborn gymnasium pettingzoo stabl
 # Core dependencies
 numpy>=1.20.0
 gymnasium>=0.28.0
+pettingzoo>=1.24.0
 
 # Game engine
 dataclasses>=0.6; python_version < '3.7'
@@ -11,9 +12,16 @@ dataclasses>=0.6; python_version < '3.7'
 # Visualization (optional)
 pygame>=2.5.0
 
+# Video/GIF export (optional)
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
 # RL Training (optional)
 # stable-baselines3>=2.0.0
 # torch>=2.0.0
+
+# Config
+pyyaml>=6.0
 
 # Testing
 pytest>=7.0.0
