@@ -214,7 +214,7 @@ def create_opponent_agents(seed: int = 42) -> list:
     # Use derived seeds for each opponent for reproducibility
     opponents = [
         RandomAgent(player_id=1, seed=seed + 100),
-        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=5, max_depth=5, seed=seed + 200),
+        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=3, max_depth=3, seed=seed + 200),
         GreedyAgent(player_id=3),  # Deterministic, no seed needed
     ]
     
