@@ -2,7 +2,7 @@
 # Matches DEFAULT_CONFIG in Monopoly/agents/ddqn_hybrid.py
 
 # Core DDQN parameters
-gamma: 0.99
+gamma: 0.999
 lr: 1.0e-4
 batch_size: 64
 buffer_size: 100000

@@ -296,7 +296,7 @@ class DDQNHybridTrainer:
     # Default hyperparameters (well-tuned for Monopoly)
     # References: DQN (Mnih et al., 2015), DDQN (van Hasselt et al., 2016)
     DEFAULT_CONFIG = {
-        'gamma': 0.99,           # Discount factor (0.99 is standard)
+        'gamma': 0.999,           # Discount factor (0.99 is standard)
         'lr': 1e-4,              # Learning rate (Adam)
         'batch_size': 64,        # Mini-batch size
         'buffer_size': 100_000,  # Replay buffer capacity
