@@ -577,7 +577,7 @@ def train_ddqn_hybrid(
     max_turns: int = 500,
     output_dir: str = 'runs/ddqn_hybrid',
     seed: int = 42,
-    eval_interval: int = 100000,
+    eval_interval: int = 1000000,
     eval_episodes: int = 100,
     verbose: int = 1,
     config: Optional[Dict[str, Any]] = None,
@@ -910,7 +910,7 @@ Examples:
     parser.add_argument('--total_timesteps', type=int, default=100000, 
                        help='Total training timesteps')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--eval_interval', type=int, default=100000,
+    parser.add_argument('--eval_interval', type=int, default=1000000,
                        help='Steps between evaluations')
     parser.add_argument('--output_dir', type=str, default='runs/',
                        help='Output directory for models/logs/metrics')
