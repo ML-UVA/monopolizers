@@ -1160,13 +1160,13 @@ class DDQNHybridTrainer:
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
         if checkpoint_path.exists() and checkpoint_path.is_file():
-            ckpt = torch.load(checkpoint_path, map_location=self.device)
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             self._load_checkpoint_dict(ckpt)
             return
 
         consolidated_path = model_dir / f"{checkpoint}.pt"
         if consolidated_path.exists():
-            consolidated_ckpt = torch.load(consolidated_path, map_location=self.device)
+            consolidated_ckpt = torch.load(consolidated_path, map_location=self.device, weights_only=False)
             self._load_checkpoint_dict(consolidated_ckpt)
         else:
             # Legacy 3-file format
