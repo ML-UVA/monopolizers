@@ -219,7 +219,7 @@ def load_ddqn_for_eval(model_path: str, device: str = "auto"):
         return obs_dim, action_dim, hidden_dims
 
     resolved_device = _resolve_device(device)
-    checkpoint = torch.load(model_path, map_location=resolved_device)
+    checkpoint = torch.load(model_path, map_location=resolved_device, weights_only=False)
 
     # Consolidated DDQN trainer checkpoint.
     if isinstance(checkpoint, dict) and "online_state_dict" in checkpoint:
