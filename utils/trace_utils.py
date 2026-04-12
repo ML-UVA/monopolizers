@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+import torch
 
 from Monopoly.envs.tracing import COLOR_GROUPS
 
@@ -191,6 +192,101 @@ def load_ddqn_for_eval(model_path: str, device: str = "auto"):
     """
     from Monopoly.agents.network import QNetwork
 
-    model = QNetwork.load(model_path, device=device)
-    model.eval()
-    return model
+    def _resolve_device(device_name: str) -> torch.device:
+        if device_name == "auto":
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device(device_name)
+
+    def _infer_dims(state_dict: Dict[str, torch.Tensor]) -> tuple:
+        """Infer obs/action/hidden dims from QNetwork-style state_dict."""
+        weight_keys = [
+            key for key in state_dict.keys()
+            if key.startswith("network.") and key.endswith(".weight")
+        ]
+        if not weight_keys:
+            raise ValueError("Could not infer network dimensions from state_dict")
+
+        def layer_index(key: str) -> int:
+            # network.0.weight -> 0
+            return int(key.split(".")[1])
+
+        ordered_keys = sorted(weight_keys, key=layer_index)
+        ordered_weights = [state_dict[key] for key in ordered_keys]
+
+        obs_dim = int(ordered_weights[0].shape[1])
+        action_dim = int(ordered_weights[-1].shape[0])
+        hidden_dims = [int(weight.shape[0]) for weight in ordered_weights[:-1]]
+        return obs_dim, action_dim, hidden_dims
+
+    resolved_device = _resolve_device(device)
+    checkpoint = torch.load(model_path, map_location=resolved_device)
+
+    # Consolidated DDQN trainer checkpoint.
+    if isinstance(checkpoint, dict) and "online_state_dict" in checkpoint:
+        state_dict = checkpoint["online_state_dict"]
+        obs_dim = checkpoint.get("obs_dim")
+        action_dim = checkpoint.get("action_dim")
+
+        hidden_dims = checkpoint.get("hidden_dims")
+        if hidden_dims is None:
+            cfg = checkpoint.get("config")
+            if isinstance(cfg, dict):
+                hidden_dims = cfg.get("hidden_dims")
+
+        if obs_dim is None or action_dim is None or hidden_dims is None:
+            inferred_obs_dim, inferred_action_dim, inferred_hidden_dims = _infer_dims(state_dict)
+            obs_dim = inferred_obs_dim if obs_dim is None else int(obs_dim)
+            action_dim = inferred_action_dim if action_dim is None else int(action_dim)
+            hidden_dims = inferred_hidden_dims if hidden_dims is None else hidden_dims
+
+        model = QNetwork(
+            obs_dim=int(obs_dim),
+            action_dim=int(action_dim),
+            hidden_dims=[int(x) for x in hidden_dims],
+            device=str(resolved_device),
+        )
+        model.load_state_dict(state_dict)
+        model.eval()
+        return model
+
+    # QNetwork checkpoint format ({model_state_dict, obs_dim, action_dim, hidden_dims}).
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        if all(k in checkpoint for k in ("obs_dim", "action_dim", "hidden_dims")):
+            model = QNetwork(
+                obs_dim=int(checkpoint["obs_dim"]),
+                action_dim=int(checkpoint["action_dim"]),
+                hidden_dims=[int(x) for x in checkpoint["hidden_dims"]],
+                device=str(resolved_device),
+            )
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.eval()
+            return model
+
+        inferred_obs_dim, inferred_action_dim, inferred_hidden_dims = _infer_dims(checkpoint["model_state_dict"])
+        model = QNetwork(
+            obs_dim=inferred_obs_dim,
+            action_dim=inferred_action_dim,
+            hidden_dims=inferred_hidden_dims,
+            device=str(resolved_device),
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        return model
+
+    # Raw state dict fallback.
+    if isinstance(checkpoint, dict) and checkpoint and all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+        inferred_obs_dim, inferred_action_dim, inferred_hidden_dims = _infer_dims(checkpoint)
+        model = QNetwork(
+            obs_dim=inferred_obs_dim,
+            action_dim=inferred_action_dim,
+            hidden_dims=inferred_hidden_dims,
+            device=str(resolved_device),
+        )
+        model.load_state_dict(checkpoint)
+        model.eval()
+        return model
+
+    raise ValueError(
+        "Unsupported DDQN checkpoint format. Expected consolidated trainer .pt, "
+        "QNetwork .pt, or raw PyTorch state_dict."
+    )

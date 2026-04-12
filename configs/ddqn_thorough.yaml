@@ -1,7 +1,7 @@
 # DDQN-Hybrid Thorough Preset
 # Larger buffer, slower decay — for full training runs
 
-gamma: 0.999
+gamma: 0.99
 lr: 5.0e-5
 batch_size: 128
 buffer_size: 500000
@@ -34,6 +34,7 @@ reward_weights:
 
 normalize_rewards: false
 reward_clip: 10.0
+log_training_diagnostics: false
 
 total_timesteps: 2000000
 eval_interval: 200000

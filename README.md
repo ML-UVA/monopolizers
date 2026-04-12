@@ -47,8 +47,24 @@ python train_dqn.py --train --agent dqn --total_timesteps 500000 --seed 42 --no-
 # Train DDQN-Hybrid against bots
 python train_dqn.py --train --agent ddqn_hybrid --total_timesteps 500000 --seed 42 --no-render
 
+# Continue DDQN-Hybrid training from a .pt checkpoint
+# (total_timesteps is interpreted as ADDITIONAL steps in resume mode)
+python train_dqn.py --train --agent ddqn_hybrid \
+    --resume_checkpoint runs/ddqn_hybrid_dense_networth_seed42/models/ddqn_hybrid/final.pt \
+    --total_timesteps 2000000 --seed 42 --no-render
+
+# Optional: restore replay buffer explicitly
+python train_dqn.py --train --agent ddqn_hybrid \
+    --resume_checkpoint runs/ddqn_hybrid_dense_networth_seed42/models/ddqn_hybrid/final.pt \
+    --resume_replay_buffer runs/ddqn_hybrid_dense_networth_seed42/buffers/ddqn_hybrid_replay.pkl \
+    --total_timesteps 2000000 --seed 42 --no-render
+
 # Evaluate trained model
 python train_dqn.py --evaluate --model runs/dqn_dense_networth_seed42/models/dqn/monopoly_dqn_final.zip --episodes 100
+
+# Evaluate DDQN-Hybrid .pt model
+python train_dqn.py --evaluate --agent ddqn_hybrid \
+    --model runs/ddqn_hybrid_dense_networth_seed42/models/ddqn_hybrid/final.pt --episodes 100
 ```
 
 ### 2. PettingZoo: 4 Independent RL Agents (Self-Play)
@@ -203,6 +219,9 @@ Analyze agent behavior with episode tracing:
 # Evaluate with tracing enabled
 python train_dqn.py --evaluate --model path/to/model.zip --episodes 100 --trace_eval
 
+# Evaluate DDQN-Hybrid .pt with tracing enabled
+python train_dqn.py --evaluate --agent ddqn_hybrid --model path/to/model.pt --episodes 100 --trace_eval
+
 # Analyze strategy clusters
 python scripts/analyze_strategies.py \
     --trace-dir runs/dqn_dense_networth_seed42/analysis/traces \
@@ -296,6 +315,29 @@ python train_dqn.py --evaluate --model PATH [options]
 # Baseline
 python train_dqn.py --baseline --episodes N
 ```
+
+usage: evaluate_agent.py [-h] --model MODEL
+                         [--agent-type {auto,dqn,ddqn_hybrid}]
+                         [--episodes EPISODES] [--seed SEED]
+                         [--max-turns MAX_TURNS]
+                         [--reward-mode {dense_networth,sparse_terminal}]
+                         [--output-dir OUTPUT_DIR]
+
+Batch evaluate a Monopoly RL agent with tracing
+
+options:
+  -h, --help            show this help message and exit
+  --model MODEL         Path to model checkpoint
+  --agent-type {auto,dqn,ddqn_hybrid}
+                        Model type (default: auto; inferred from .zip/.pt)
+  --episodes EPISODES   Number of episodes (default: 100)
+  --seed SEED           Random seed (default: 42)
+  --max-turns MAX_TURNS
+                        Max turns per episode (default: 500)
+  --reward-mode {dense_networth,sparse_terminal}
+                        Reward mode (default: dense_networth)
+  --output-dir OUTPUT_DIR
+                        Output directory (default: alongside model)
 
 ---
 

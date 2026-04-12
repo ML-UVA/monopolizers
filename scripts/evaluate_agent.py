@@ -13,8 +13,8 @@ Usage:
         --output-dir runs/dqn_dense_networth_seed42/analysis
 
     python scripts/evaluate_agent.py \
-        --model runs/ddqn_hybrid_.../models/ddqn_hybrid/checkpoint_online.pt \
-        --agent-type ddqn_hybrid \
+        --model runs/ddqn_hybrid_.../models/ddqn_hybrid/final.pt \
+        --agent-type auto \
         --episodes 100
 """
 
@@ -59,15 +59,39 @@ def create_eval_env(seed, max_turns, reward_mode, trace_dir, model_path=""):
 
 
 def load_model(model_path, agent_type):
-    """Load a model checkpoint based on agent type."""
-    if agent_type == "dqn":
+    """Load a model checkpoint based on agent type or file extension."""
+    suffix = Path(model_path).suffix.lower()
+    resolved_agent_type = agent_type
+
+    if agent_type == "auto":
+        if suffix == ".zip":
+            resolved_agent_type = "dqn"
+        elif suffix == ".pt":
+            resolved_agent_type = "ddqn_hybrid"
+        else:
+            raise ValueError(
+                f"Could not infer agent type from model extension '{suffix}'. "
+                "Use --agent-type dqn or --agent-type ddqn_hybrid explicitly."
+            )
+
+    if resolved_agent_type == "dqn":
+        if suffix != ".zip":
+            raise ValueError(
+                f"DQN evaluation expects an SB3 .zip model, got: {model_path}. "
+                "For DDQN checkpoints, use --agent-type ddqn_hybrid."
+            )
         from stable_baselines3 import DQN
         return DQN.load(model_path), "sb3"
-    elif agent_type == "ddqn_hybrid":
+
+    if resolved_agent_type == "ddqn_hybrid":
+        if suffix != ".pt":
+            raise ValueError(
+                f"DDQN-Hybrid evaluation expects a .pt checkpoint, got: {model_path}."
+            )
         from utils.trace_utils import load_ddqn_for_eval
         return load_ddqn_for_eval(model_path), "ddqn"
-    else:
-        raise ValueError(f"Unknown agent type: {agent_type}")
+
+    raise ValueError(f"Unknown agent type: {agent_type}")
 
 
 def predict_action(model, model_type, obs, env):
@@ -240,8 +264,8 @@ def write_tensorboard(summaries_df, output_dir):
 def main():
     parser = argparse.ArgumentParser(description="Batch evaluate a Monopoly RL agent with tracing")
     parser.add_argument("--model", required=True, help="Path to model checkpoint")
-    parser.add_argument("--agent-type", choices=["dqn", "ddqn_hybrid"], default="dqn",
-                        help="Model type (default: dqn)")
+    parser.add_argument("--agent-type", choices=["auto", "dqn", "ddqn_hybrid"], default="auto",
+                        help="Model type (default: auto; inferred from .zip/.pt)")
     parser.add_argument("--episodes", type=int, default=100, help="Number of episodes (default: 100)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--max-turns", type=int, default=500, help="Max turns per episode (default: 500)")

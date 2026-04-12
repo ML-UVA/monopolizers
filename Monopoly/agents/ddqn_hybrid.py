@@ -296,7 +296,7 @@ class DDQNHybridTrainer:
     # Default hyperparameters (well-tuned for Monopoly)
     # References: DQN (Mnih et al., 2015), DDQN (van Hasselt et al., 2016)
     DEFAULT_CONFIG = {
-        'gamma': 0.999,           # Discount factor (0.99 is standard)
+        'gamma': 0.99,           # Discount factor (0.99 is standard)
         'lr': 1e-4,              # Learning rate (Adam)
         'batch_size': 64,        # Mini-batch size
         'buffer_size': 100_000,  # Replay buffer capacity
@@ -320,6 +320,8 @@ class DDQNHybridTrainer:
         # Reward normalization
         'normalize_rewards': False,
         'reward_clip': 10.0,
+        # Logging policy
+        'log_training_diagnostics': False,
     }
 
     KNOWN_KEYS = set(DEFAULT_CONFIG.keys()) | {
@@ -716,6 +718,10 @@ class DDQNHybridTrainer:
 
         episode_reward = 0.0
         episode_length = 0
+        episode_houses_built = 0
+        episode_trades_executed = 0
+        episode_buy_opportunities = 0
+        episode_buy_actions = 0
 
         # Progress tracking
         if progress_bar:
@@ -759,14 +765,34 @@ class DDQNHybridTrainer:
             episode_length += 1
             self.total_steps += 1
 
+            # Track gameplay-oriented episode metrics.
+            if 3 <= action <= 30:
+                episode_houses_built += 1
+            if action >= 90:
+                episode_trades_executed += 1
+            if action in (1, 2):
+                episode_buy_opportunities += 1
+            if action == 1:
+                episode_buy_actions += 1
+
+            # DQN-style Monopoly game metrics (logged each step).
+            self.writer.add_scalar('game/agent_net_worth', info.get('agent_net_worth', 0), self.total_steps)
+            self.writer.add_scalar('game/agent_cash', info.get('agent_cash', 0), self.total_steps)
+            self.writer.add_scalar('game/agent_properties', info.get('agent_properties', 0), self.total_steps)
+            self.writer.add_scalar('game/active_players', info.get('active_players', 0), self.total_steps)
+
             # Training update
             if self.total_steps % self.config['train_freq'] == 0:
                 diagnostics = self.train_step()
                 if diagnostics is not None:
                     self.losses.append(diagnostics['loss'])
-                    # Log all diagnostics to TensorBoard
-                    for key, val in diagnostics.items():
-                        self.writer.add_scalar(f'train/{key}', val, self.total_steps)
+                    # Keep primary optimization loss visible by default.
+                    self.writer.add_scalar('train/loss', diagnostics['loss'], self.total_steps)
+
+                    # Optional detailed diagnostics (Q-values, TD-error, grad norm).
+                    if self.config.get('log_training_diagnostics', False):
+                        for key in ('mean_td_error', 'max_td_error', 'mean_q_value', 'max_q_value', 'grad_norm'):
+                            self.writer.add_scalar(f'train/{key}', diagnostics[key], self.total_steps)
 
             # Target network update
             if use_soft_target:
@@ -800,6 +826,13 @@ class DDQNHybridTrainer:
                 self.writer.add_scalar('train/epsilon', epsilon, self.total_steps)
                 self.writer.add_scalar('train/buffer_size', len(self.replay_buffer), self.total_steps)
 
+                buy_rate = episode_buy_actions / max(episode_buy_opportunities, 1)
+                self.writer.add_scalar('game/houses_built', episode_houses_built, self.total_steps)
+                self.writer.add_scalar('game/trades_executed', episode_trades_executed, self.total_steps)
+                self.writer.add_scalar('game/buy_actions', episode_buy_actions, self.total_steps)
+                self.writer.add_scalar('game/buy_opportunities', episode_buy_opportunities, self.total_steps)
+                self.writer.add_scalar('game/buy_rate', buy_rate, self.total_steps)
+
                 # Log modular reward components if available
                 reward_components = info.get('reward_components')
                 if reward_components is not None:
@@ -824,6 +857,10 @@ class DDQNHybridTrainer:
                 mask = self._get_action_mask(self.env)
                 episode_reward = 0.0
                 episode_length = 0
+                episode_houses_built = 0
+                episode_trades_executed = 0
+                episode_buy_opportunities = 0
+                episode_buy_actions = 0
             else:
                 obs = next_obs
                 mask = next_mask
@@ -1066,26 +1103,76 @@ class DDQNHybridTrainer:
         buffer_path = self.output_dir / 'buffers' / 'ddqn_hybrid_replay.pkl'
         save_replay_buffer(self.replay_buffer.get_data_for_save(), buffer_path)
 
-    def load_checkpoint(self, name: str = "checkpoint") -> None:
-        """Load model checkpoint (supports both consolidated and legacy 3-file format)."""
-        model_dir = self.output_dir / 'models' / 'ddqn_hybrid'
+    def load_replay_buffer(self, filepath: Union[str, Path]) -> None:
+        """Load replay buffer transitions from file."""
+        from utils.save_utils import load_replay_buffer
 
-        consolidated_path = model_dir / f"{name}.pt"
-        if consolidated_path.exists():
-            checkpoint = torch.load(consolidated_path, map_location=self.device)
+        buffer_data = load_replay_buffer(filepath)
+        self.replay_buffer.load_data(buffer_data)
+
+    def _load_checkpoint_dict(self, checkpoint: Dict[str, Any]) -> None:
+        """Load trainer/network state from an in-memory checkpoint dictionary."""
+        if 'online_state_dict' in checkpoint:
+            # Consolidated DDQN trainer checkpoint
             self.q_online.load_state_dict(checkpoint['online_state_dict'])
-            self.q_target.load_state_dict(checkpoint['target_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.total_steps = checkpoint['total_steps']
-            self.episodes_completed = checkpoint['episodes_completed']
-            self.best_win_rate = checkpoint.get('best_win_rate', -1.0)
+            self.q_target.load_state_dict(checkpoint.get('target_state_dict', checkpoint['online_state_dict']))
+
+            if 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            self.total_steps = int(checkpoint.get('total_steps', self.total_steps))
+            self.episodes_completed = int(checkpoint.get('episodes_completed', self.episodes_completed))
+            self.best_win_rate = float(checkpoint.get('best_win_rate', self.best_win_rate))
+
             if self.reward_normalizer is not None and 'reward_normalizer' in checkpoint:
                 self.reward_normalizer.load_state_dict(checkpoint['reward_normalizer'])
+            return
+
+        if 'model_state_dict' in checkpoint:
+            # QNetwork checkpoint format
+            self.q_online.load_state_dict(checkpoint['model_state_dict'])
+            self.q_target.load_state_dict(checkpoint['model_state_dict'])
+
+            if 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            self.total_steps = int(checkpoint.get('total_steps', self.total_steps))
+            self.episodes_completed = int(checkpoint.get('episodes_completed', self.episodes_completed))
+            return
+
+        # Raw state dict fallback
+        if checkpoint and all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+            self.q_online.load_state_dict(checkpoint)
+            self.q_target.load_state_dict(checkpoint)
+            return
+
+        raise ValueError(
+            "Unsupported checkpoint format. Expected consolidated DDQN checkpoint, "
+            "QNetwork checkpoint, or raw state_dict."
+        )
+
+    def load_checkpoint(self, checkpoint: str = "checkpoint") -> None:
+        """Load model checkpoint from a name in run dir or an explicit checkpoint path."""
+        model_dir = self.output_dir / 'models' / 'ddqn_hybrid'
+
+        checkpoint_path = Path(checkpoint)
+        if checkpoint_path.suffix == '.pt' and not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+        if checkpoint_path.exists() and checkpoint_path.is_file():
+            ckpt = torch.load(checkpoint_path, map_location=self.device)
+            self._load_checkpoint_dict(ckpt)
+            return
+
+        consolidated_path = model_dir / f"{checkpoint}.pt"
+        if consolidated_path.exists():
+            consolidated_ckpt = torch.load(consolidated_path, map_location=self.device)
+            self._load_checkpoint_dict(consolidated_ckpt)
         else:
             # Legacy 3-file format
-            self.q_online = QNetwork.load(model_dir / f"{name}_online.pt", device=self.device)
-            self.q_target = QNetwork.load(model_dir / f"{name}_target.pt", device=self.device)
-            state = torch.load(model_dir / f"{name}_trainer_state.pt", map_location=self.device)
+            self.q_online = QNetwork.load(model_dir / f"{checkpoint}_online.pt", device=self.device)
+            self.q_target = QNetwork.load(model_dir / f"{checkpoint}_target.pt", device=self.device)
+            state = torch.load(model_dir / f"{checkpoint}_trainer_state.pt", map_location=self.device)
             self.optimizer.load_state_dict(state['optimizer_state_dict'])
             self.total_steps = state['total_steps']
             self.episodes_completed = state['episodes_completed']

@@ -26,8 +26,14 @@ Example Usage:
     # Train with DDQN-Hybrid
     python train_dqn.py --train --agent ddqn_hybrid --reward_mode dense_networth --seed 42
 
+    # Continue DDQN-Hybrid training from a .pt checkpoint
+    python train_dqn.py --train --agent ddqn_hybrid --resume_checkpoint runs/ddqn_hybrid_dense_networth_seed42/models/ddqn_hybrid/final.pt --total_timesteps 2000000
+
     # Evaluate a trained model
     python train_dqn.py --evaluate --model runs/dqn_seed42/models/dqn/monopoly_dqn_final.zip
+
+    # Evaluate DDQN-Hybrid .pt checkpoint
+    python train_dqn.py --evaluate --agent ddqn_hybrid --model runs/ddqn_hybrid_dense_networth_seed42/models/ddqn_hybrid/final.pt
 
     # Run random baseline
     python train_dqn.py --baseline --episodes 100
@@ -214,7 +220,7 @@ def create_opponent_agents(seed: int = 42) -> list:
     # Use derived seeds for each opponent for reproducibility
     opponents = [
         RandomAgent(player_id=1, seed=seed + 100),
-        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=3, max_depth=3, seed=seed + 200),
+        MCTSAgent(player_id=2, engine=mcts_engine, rollouts=5, max_depth=5, seed=seed + 200),
         GreedyAgent(player_id=3),  # Deterministic, no seed needed
     ]
     
@@ -583,6 +589,9 @@ def train_ddqn_hybrid(
     config: Optional[Dict[str, Any]] = None,
     reward_mode: RewardMode = 'dense_networth',
     render: bool = False,
+    resume_checkpoint: Optional[str] = None,
+    resume_replay_buffer: Optional[str] = None,
+    auto_resume_buffer: bool = True,
 ) -> None:
     """
     Train using custom DDQN-Hybrid trainer with PyTorch.
@@ -603,6 +612,9 @@ def train_ddqn_hybrid(
             - 'dense_networth': r = nw_agent / sum(nw_others) every step
             - 'sparse_terminal': +1 win, -1 lose, 0 otherwise
         render: Whether to enable visualization (slows training)
+        resume_checkpoint: Optional path to DDQN .pt checkpoint to resume from
+        resume_replay_buffer: Optional path to replay buffer .pkl to restore
+        auto_resume_buffer: When resuming, auto-load output_dir buffer if present
     """
     # Set seeds
     set_global_seeds(seed)
@@ -651,10 +663,46 @@ def train_ddqn_hybrid(
         config=config,
         verbose=verbose
     )
+
+    # Optional resume from checkpoint
+    if resume_checkpoint:
+        checkpoint_path = Path(resume_checkpoint)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        print(f"\nResuming from checkpoint: {checkpoint_path}")
+        trainer.load_checkpoint(str(checkpoint_path))
+        print(
+            f"Loaded trainer state | total_steps={trainer.total_steps} | "
+            f"episodes={trainer.episodes_completed}"
+        )
+
+        if resume_replay_buffer:
+            replay_path = Path(resume_replay_buffer)
+            if not replay_path.exists():
+                raise FileNotFoundError(f"Replay buffer not found: {replay_path}")
+            trainer.load_replay_buffer(str(replay_path))
+            print(f"Loaded replay buffer from: {replay_path}")
+        elif auto_resume_buffer:
+            default_replay_path = Path(output_dir) / 'buffers' / 'ddqn_hybrid_replay.pkl'
+            if default_replay_path.exists():
+                trainer.load_replay_buffer(str(default_replay_path))
+                print(f"Auto-loaded replay buffer from: {default_replay_path}")
+            else:
+                print(f"No replay buffer found at {default_replay_path}; continuing with empty buffer.")
+
+        # Resume semantics: run for additional timesteps from checkpoint step count.
+        target_total_timesteps = trainer.total_steps + total_timesteps
+        print(
+            f"Resume mode: running {total_timesteps} additional steps "
+            f"to reach total_steps={target_total_timesteps}."
+        )
+    else:
+        target_total_timesteps = total_timesteps
     
     # Train
     results = trainer.train(
-        total_timesteps=total_timesteps,
+        total_timesteps=target_total_timesteps,
         eval_interval=eval_interval,
         eval_episodes=min(eval_episodes, 50),
         log_interval=1000,
@@ -680,6 +728,7 @@ def evaluate_model(
     render: bool = False,
     verbose: bool = True,
     trace_dir: Optional[str] = None,
+    agent: str = 'dqn',
 ) -> Dict[str, float]:
     """
     Evaluate a trained DQN model in 4-player mode.
@@ -691,6 +740,7 @@ def evaluate_model(
         seed: Random seed
         render: Whether to render games
         verbose: Print detailed results
+        agent: Model family ('dqn' or 'ddqn_hybrid')
         
     Returns:
         Dictionary of evaluation metrics
@@ -698,15 +748,30 @@ def evaluate_model(
     set_global_seeds(seed)
     
     print("=" * 60)
-    print("Evaluating Monopoly DQN Agent (4-Player Mode)")
+    print("Evaluating Monopoly RL Agent (4-Player Mode)")
     print("=" * 60)
     print(f"Model: {model_path}")
+    resolved_agent = agent
+    model_suffix = Path(model_path).suffix.lower()
+    if resolved_agent == 'dqn' and model_suffix == '.pt':
+        resolved_agent = 'ddqn_hybrid'
+        print("Agent type auto-detected from .pt model: ddqn_hybrid")
+    else:
+        print(f"Agent type: {resolved_agent}")
     print(f"Episodes: {num_episodes}")
     print(f"Opponents: Random, MCTS, Greedy")
     print("=" * 60)
     
     # Load model
-    model = DQN.load(model_path)
+    if resolved_agent == 'dqn':
+        model = DQN.load(model_path)
+        model_type = 'sb3'
+    elif resolved_agent == 'ddqn_hybrid':
+        from utils.trace_utils import load_ddqn_for_eval
+        model = load_ddqn_for_eval(model_path)
+        model_type = 'ddqn'
+    else:
+        raise ValueError(f"Unsupported agent type for evaluation: {resolved_agent}")
     
     # Create evaluation environment
     env = make_monopoly_env(
@@ -733,7 +798,12 @@ def evaluate_model(
         
         while not (terminated or truncated):
             # Get action from model
-            action, _ = model.predict(obs, deterministic=True)
+            if model_type == 'sb3':
+                action, _ = model.predict(obs, deterministic=True)
+                action = int(action)
+            else:
+                legal_mask = env.unwrapped._get_legal_mask()
+                action = model.select_action(obs, action_mask=legal_mask, epsilon=0.0)
             
             # Apply action masking
             legal_mask = env.unwrapped._get_legal_mask()
@@ -887,9 +957,15 @@ Examples:
     
     # Train with DDQN-Hybrid
     python train_dqn.py --agent ddqn_hybrid --total_timesteps 2000000 --output_dir runs/ddqn_hybrid_seed42
+
+    # Resume DDQN-Hybrid from a checkpoint for additional timesteps
+    python train_dqn.py --train --agent ddqn_hybrid --resume_checkpoint runs/ddqn_hybrid_seed42/models/ddqn_hybrid/final.pt --total_timesteps 500000
     
     # Evaluate a model
     python train_dqn.py --evaluate --model runs/dqn_seed42/models/dqn/monopoly_dqn_final.zip
+
+    # Evaluate DDQN-Hybrid .pt checkpoint
+    python train_dqn.py --evaluate --agent ddqn_hybrid --model runs/ddqn_hybrid_seed42/models/ddqn_hybrid/final.pt
     
     # Run baseline
     python train_dqn.py --baseline --episodes 100
@@ -914,6 +990,16 @@ Examples:
                        help='Steps between evaluations')
     parser.add_argument('--output_dir', type=str, default='runs/',
                        help='Output directory for models/logs/metrics')
+
+    # DDQN resume options
+    parser.add_argument('--resume_checkpoint', type=str, default=None,
+                       help='Path to DDQN .pt checkpoint for continuing training')
+    parser.add_argument('--resume_replay_buffer', type=str, default=None,
+                       help='Path to DDQN replay buffer .pkl file for resume')
+    parser.add_argument('--no_resume_buffer_autoload', action='store_true',
+                       help='Disable auto-loading output_dir/buffers/ddqn_hybrid_replay.pkl when resuming DDQN')
+    parser.add_argument('--ddqn_log_diagnostics', action='store_true',
+                       help='Enable DDQN Q/TD diagnostic TensorBoard metrics (disabled by default)')
     
     # DQN-specific
     parser.add_argument('--config', type=str, default='default', 
@@ -935,7 +1021,7 @@ Examples:
     
     # Evaluation parameters
     parser.add_argument('--model', type=str, default='models/monopoly_dqn_final.zip',
-                       help='Path to model for evaluation')
+                       help='Path to model for evaluation (.zip for dqn, .pt for ddqn_hybrid)')
     parser.add_argument('--episodes', type=int, default=100, 
                        help='Number of evaluation episodes')
     
@@ -981,6 +1067,12 @@ Examples:
             if args.config_file:
                 from Monopoly.agents.ddqn_hybrid import load_yaml_config
                 ddqn_config = load_yaml_config(args.config_file)
+
+            if ddqn_config is None:
+                ddqn_config = {}
+            if args.ddqn_log_diagnostics:
+                ddqn_config['log_training_diagnostics'] = True
+
             train_ddqn_hybrid(
                 total_timesteps=args.total_timesteps,
                 max_turns=args.max_turns,
@@ -992,6 +1084,9 @@ Examples:
                 verbose=args.verbose,
                 config=ddqn_config,
                 render=enable_render,
+                resume_checkpoint=args.resume_checkpoint,
+                resume_replay_buffer=args.resume_replay_buffer,
+                auto_resume_buffer=not args.no_resume_buffer_autoload,
             )
     
     if args.evaluate:
@@ -1005,6 +1100,7 @@ Examples:
             seed=args.seed,
             trace_dir=trace_dir,
             render=enable_render,
+            agent=args.agent,
         )
     
     if args.baseline:

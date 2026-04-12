@@ -2,7 +2,7 @@
 # Matches DEFAULT_CONFIG in Monopoly/agents/ddqn_hybrid.py
 
 # Core DDQN parameters
-gamma: 0.999
+gamma: 0.99
 lr: 1.0e-4
 batch_size: 64
 buffer_size: 100000
@@ -40,6 +40,7 @@ reward_weights:
 # Reward normalization (works with any reward mode)
 normalize_rewards: false
 reward_clip: 10.0
+log_training_diagnostics: false
 
 # Training schedule
 total_timesteps: 500000
